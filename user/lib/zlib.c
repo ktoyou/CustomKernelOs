@@ -51,6 +51,7 @@ struct internal_state {
     unsigned char *outbuf;
     unsigned out_len, out_pos;
     int compressed;
+    int gzip_os;
 };
 
 static const unsigned short len_base[29] = {
@@ -1040,7 +1041,7 @@ static unsigned char *pack_raw(const unsigned char *in, int n, int level, int *o
     return stored.p;
 }
 
-static unsigned char *wrap_out(int wrap, int level, const unsigned char *raw, int n,
+static unsigned char *wrap_out(int wrap, int level, int gzip_os, const unsigned char *raw, int n,
                                const unsigned char *def, int dn, int *out_n) {
     unsigned char *out;
     unsigned a;
@@ -1058,7 +1059,7 @@ static unsigned char *wrap_out(int wrap, int level, const unsigned char *raw, in
         out = malloc((size_t)total);
         if (!out) return 0;
         out[0] = 0x1f; out[1] = 0x8b; out[2] = 8; out[3] = 0;
-        out[4] = out[5] = out[6] = out[7] = out[8] = 0; out[9] = 255;
+        out[4] = out[5] = out[6] = out[7] = out[8] = 0; out[9] = (unsigned char)gzip_os;
         memcpy(out + 10, def, (size_t)dn);
         a = (unsigned)crc32(0, raw ? raw : (const Bytef *)"", (uInt)n);
         for (i = 0; i < 4; i++) out[10 + dn + i] = (unsigned char)((a >> (8 * i)) & 255);
@@ -1087,7 +1088,7 @@ static int deflate_produce(z_streamp strm) {
     if (st->in_len > 0x7fffffffu) return Z_MEM_ERROR;
     def = pack_raw(st->inbuf, (int)st->in_len, st->level, &dn);
     if (!def) return Z_MEM_ERROR;
-    out = wrap_out(st->wrap == 2 ? 2 : st->wrap == 0 ? 0 : 1, st->level,
+    out = wrap_out(st->wrap == 2 ? 2 : st->wrap == 0 ? 0 : 1, st->level, st->gzip_os,
                    st->inbuf, (int)st->in_len, def, dn, &on);
     free(def);
     if (!out) return Z_MEM_ERROR;
@@ -1152,6 +1153,12 @@ int deflate(z_streamp strm, int flush) {
     return Z_BUF_ERROR;
 }
 
+int deflateSetHeader(z_streamp strm, gz_headerp head) {
+    if (!strm || !strm->state || strm->state->kind != 1 || !head) return Z_STREAM_ERROR;
+    if (strm->state->wrap != 2) return Z_STREAM_ERROR;
+    strm->state->gzip_os = head->os;
+    return Z_OK;
+}
 int deflateEnd(z_streamp strm) {
     if (!strm || !strm->state || strm->state->kind != 1) return Z_STREAM_ERROR;
     free_bufs(strm->state);
@@ -1178,6 +1185,7 @@ static int deflate_init(z_streamp strm, int level, int method, int windowBits,
     st->kind = 1;
     st->wrap = wrap;
     st->level = level;
+    st->gzip_os = 255;
     strm->state = st;
     strm->msg = 0;
     strm->total_in = strm->total_out = 0;
@@ -1208,6 +1216,7 @@ int deflateReset(z_streamp strm) {
     st->kind = 1;
     st->wrap = wrap;
     st->level = level;
+    st->gzip_os = 255;
     strm->total_in = strm->total_out = 0;
     strm->msg = 0;
     strm->adler = wrap == 2 ? 0 : 1;

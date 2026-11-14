@@ -62,6 +62,8 @@ int   pipe_create(struct file **rd, struct file **wr);
 /* buf — указатель в памяти текущего процесса (уже проверенный) */
 int   file_read(struct file *f, void *buf, u32 len);
 int   file_write(struct file *f, const void *buf, u32 len, bool is_stderr);
+int   file_pread(struct file *f, void *buf, u32 len, u32 off);
+int   file_pwrite(struct file *f, const void *buf, u32 len, u32 off);
 int   file_lseek(struct file *f, int off, int whence);   /* -> новое смещение или -errno */
 
 #define FMODE_READ   1

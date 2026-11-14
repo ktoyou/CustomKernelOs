@@ -59,14 +59,13 @@ with tempfile.TemporaryDirectory(prefix='myos-parallel-build-') as temporary:
     fs('mkdir','/tmp/ext/nano');fs('put',archive,'/tmp/ext/nano/nano-9.3.tar.gz')
     lua_source=B/'lua-5.4.8'
     assert (lua_source/'lua.h').is_file(), 'Prepare Lua 5.4.8 with make luatest'
-    fs('mkdir','/ext/instructions/lua');fs('mkdir','/tmp/ext/lua')
+    fs('mkdir','/ext/instructions/lua');fs('mkdir','/tmp/ext/lua-src')
     for source in Path('ext/instructions/lua').iterdir():
         if source.is_file():fs('put',source,'/ext/instructions/lua/'+source.name)
+    for source in lua_source.iterdir():
+        if source.is_file():fs('put',source,'/tmp/ext/lua-src/'+source.name)
     lines=Path('ext/instructions/lua/setup.inst').read_text().splitlines()
-    for line in lines:
-        if line.startswith('fetch '):
-            name=line.split()[-1];fs('put',lua_source/name,'/tmp/ext/lua/'+name)
-    text('/ext/instructions/lua/setup.inst','\n'.join('# preloaded pinned source' if line.startswith('fetch ') else line for line in lines)+'\n')
+    text('/ext/instructions/lua/setup.inst','\n'.join('# preloaded pinned source' if line.startswith('git ') else line for line in lines)+'\n')
     vm=VM('parallel-build-native',B/'os.img',[
         '-drive',f'format=raw,file={disk},index=1,snapshot=on'],4,memory='512M')
     try:

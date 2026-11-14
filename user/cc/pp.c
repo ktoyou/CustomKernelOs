@@ -30,6 +30,11 @@ static Macro *macros[NBUCKET];
 static CondIncl *cond_incl;
 static int include_depth;
 
+/* path → имя стража. Повторный #include не токенизируется, если страж уже
+ * определён: иначе OpenSSL (ssl.h тянет obj_mac.h десятки раз) съедает сотни МБ. */
+typedef struct IncGuard { struct IncGuard *next; char *path; char *macro; } IncGuard;
+static IncGuard *inc_guards[NBUCKET];
+
 static unsigned hash(const char *s, int n) {
     unsigned h = 2166136261u;
     for (int i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619u;
@@ -97,6 +102,15 @@ static Token *append(Token *a, Token *b) {           /* копия a (без EOF
     return head.next;
 }
 
+/* Список a свежий (файл только что прочитан) и больше нигде не нужен. */
+static Token *splice(Token *a, Token *b) {
+    Token *cur;
+    if (a->kind == TK_EOF) return b;
+    for (cur = a; cur->next->kind != TK_EOF; cur = cur->next);
+    cur->next = b;
+    return a;
+}
+
 static bool is_hash(Token *tok) { return tok->at_bol && equal(tok, "#"); }
 
 static Token *skip_line(Token *tok) {
@@ -116,6 +130,71 @@ static Token *copy_line(Token **rest, Token *tok) {
 }
 
 static char *tok_str(Token *t) { return strndup2(t->loc, t->len); }
+
+static bool macro_defined_name(const char *name) {
+    int n = strlen(name);
+    for (Macro *m = macros[hash(name, n)]; m; m = m->next)
+        if ((int)strlen(m->name) == n && !strcmp(m->name, name)) return true;
+    return false;
+}
+
+static char *guard_of(const char *path) {
+    int n = strlen(path);
+    for (IncGuard *g = inc_guards[hash(path, n)]; g; g = g->next)
+        if (!strcmp(g->path, path)) return g->macro;
+    return NULL;
+}
+
+static void remember_guard(char *path, char *macro) {
+    unsigned h = hash(path, strlen(path));
+    IncGuard *g = xcalloc(sizeof(IncGuard));
+    g->path = path;
+    g->macro = macro;
+    g->next = inc_guards[h];
+    inc_guards[h] = g;
+}
+
+/* Файл целиком обёрнут в #ifndef NAME / #define NAME / ... / #endif.
+ * #else на внешнем уровне или текст после #endif — стража нет: такой файл
+ * нельзя пропускать, когда NAME уже определён. */
+static char *detect_include_guard(Token *tok) {
+    Token *name, *def, *dir;
+    int depth;
+    if (!tok || !is_hash(tok) || !equal(tok->next, "ifndef")) return NULL;
+    name = tok->next->next;
+    if (!name || name->kind != TK_IDENT) return NULL;
+    tok = name->next;
+    if (!tok || !is_hash(tok) || !equal(tok->next, "define")) return NULL;
+    def = tok->next->next;
+    if (!def || def->kind != TK_IDENT || def->len != name->len ||
+        strncmp(def->loc, name->loc, name->len)) return NULL;
+    tok = def->next;
+    depth = 1;
+    while (tok->kind != TK_EOF) {
+        if (!is_hash(tok)) { tok = tok->next; continue; }
+        dir = tok->next;
+        if (!dir || dir->kind == TK_EOF) break;
+        if (equal(dir, "if") || equal(dir, "ifdef") || equal(dir, "ifndef")) {
+            depth++;
+            tok = dir->next;
+            continue;
+        }
+        if (equal(dir, "elif") || equal(dir, "else")) {
+            if (depth == 1) return NULL;
+            tok = dir->next;
+            continue;
+        }
+        if (equal(dir, "endif")) {
+            depth--;
+            tok = dir->next;
+            while (tok->kind != TK_EOF && !tok->at_bol) tok = tok->next;
+            if (depth == 0) return tok->kind == TK_EOF ? tok_str(name) : NULL;
+            continue;
+        }
+        tok = tok->next;
+    }
+    return NULL;
+}
 
 /* ------------------------------------------------------------ #define */
 
@@ -364,7 +443,7 @@ static char *search_include(char *name, Token *tok, bool quoted) {
 static Token *include_file(Token *tok, char *path, Token *filename_tok) {
     Token *t = tokenize_file(path);
     if (!t) error_tok(filename_tok, "%s: cannot open file", path);
-    return append(t, tok);
+    return splice(t, tok);
 }
 
 static char *read_include_filename(Token **rest, Token *tok, bool *quoted) {
@@ -471,7 +550,9 @@ static CondIncl *push_cond_incl(Token *tok, bool included) {
 static Token *preprocess2(Token *tok) {
     Token head = {0}, *cur = &head;
     while (tok->kind != TK_EOF) {
-        if (expand_macro(&tok, tok)) continue;
+        /* st->open( — open это макрос с аргументами, но член структуры. */
+        if (!(cur != &head && (equal(cur, ".") || equal(cur, "->")) && equal(tok->next, "("))
+            && expand_macro(&tok, tok)) continue;
         if (!is_hash(tok)) {
             cur = cur->next = tok;
             tok = tok->next;
@@ -482,13 +563,33 @@ static Token *preprocess2(Token *tok) {
 
         if (equal(tok, "include")) {
             bool quoted;
-            char *name = read_include_filename(&tok, tok->next, &quoted);
+            Token *arg = tok->next;
+            char *name;
+            if (arg->kind == TK_IDENT) {
+                Macro *m = find_macro(arg);
+                Token *b = m ? m->body : NULL;
+                if (!m || m->builtin || !m->is_objlike || !b || b->kind != TK_STR)
+                    error_tok(arg, "expected a filename");
+                quoted = true;
+                name = strndup2(b->loc + 1, b->len - 2);
+                tok = skip_line(arg->next);
+            } else name = read_include_filename(&tok, arg, &quoted);
             char *path = search_include(name, start, quoted);
+            char *guard;
             if (!path) error_tok(start, "%s: file not found", name);
-            /* Счётчик — число директив #include в одном файле, а не глубина стека:
-             * заголовки вставляются в общий поток токенов. У Lua их больше 70. */
-            if (++include_depth > 256) error_tok(start, "#include nested too deeply");
-            tok = include_file(tok, path, start->next->next);
+            guard = guard_of(path);
+            if (guard && macro_defined_name(guard)) continue;
+            /* Счётчик — число реально вставленных #include. Повтор одного и того же
+             * стража сюда не доходит: OpenSSL иначе легко переваливает за тысячу. */
+            if (++include_depth > 8192) error_tok(start, "#include nested too deeply");
+            if (!guard) {
+                Token *fresh = tokenize_file(path);
+                char *found;
+                if (!fresh) error_tok(start->next->next, "%s: cannot open file", path);
+                found = detect_include_guard(fresh);
+                if (found) remember_guard(path, found);
+                tok = splice(fresh, tok);
+            } else tok = include_file(tok, path, start->next->next);
             continue;
         }
         if (equal(tok, "define")) { read_macro_definition(&tok, tok->next); continue; }
@@ -545,7 +646,7 @@ static Token *preprocess2(Token *tok) {
     return head.next;
 }
 
-#define MAX_USER_DEFS 32
+#define MAX_USER_DEFS 128
 static char *user_defs[MAX_USER_DEFS];
 static int n_user_defs;
 
@@ -566,7 +667,16 @@ static void init_macros(void) {
     define_macro("__MYOS_CC__", "1");
     define_macro("__MYOS__", "1");
     define_macro("__STDC__", "1");
+    define_macro("__STDC_VERSION__", "199901L");
+    define_macro("__STDC_HOSTED__", "1");
     define_macro("__i386__", "1");
+    define_macro("__LITTLE_ENDIAN__", "1");
+    define_macro("__BYTE_ORDER__", "1234");
+    define_macro("__ORDER_LITTLE_ENDIAN__", "1234");
+    define_macro("__ORDER_BIG_ENDIAN__", "4321");
+    define_macro("__BYTE_ORDER", "__BYTE_ORDER__");
+    define_macro("__LITTLE_ENDIAN", "1234");
+    define_macro("__BIG_ENDIAN", "4321");
     define_macro("__SIZEOF_INT__", "4");
     define_macro("__SIZEOF_POINTER__", "4");
     if (opt_linux) define_macro("__LINUX_TEST__", "1");
@@ -606,6 +716,7 @@ static void join_strings(Token *tok) {
 
 Token *preprocess(Token *tok) {
     memset(macros, 0, sizeof(macros));             /* каждый файл — с чистого листа */
+    memset(inc_guards, 0, sizeof(inc_guards));
     cond_incl = NULL;
     include_depth = 0;
     init_macros();

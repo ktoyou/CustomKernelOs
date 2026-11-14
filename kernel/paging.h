@@ -18,7 +18,7 @@
 #define SHM_END      0xB0000000u
 #define INTERP_BASE  0x80000000u    /* динамический загрузчик (PT_INTERP) */
 #define MMAP_BASE    SHM_END        /* mmap: анонимные страницы и MAP_PRIVATE */
-#define USER_STACK_PAGES 256u
+#define USER_STACK_PAGES 1024u /* 4 МБ: git; remote-http после фикса time/datetime_get */
 #define USER_STACK_BOTTOM (USER_TOP - USER_STACK_PAGES * PAGE_SIZE)
 #define USER_STACK_GUARD (USER_STACK_BOTTOM - PAGE_SIZE)
 #define MMAP_END USER_STACK_GUARD

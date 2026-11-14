@@ -2213,7 +2213,7 @@ double js_now_ms(void) {
     static unsigned base_ticks;
     if (!base) {
         struct datetime t;
-        get_time(&t);
+        datetime_get(&t);
         base = days_from_civil(t.year, t.month, t.day) * 86400000.0 + t.hour * 3600000.0 + t.min * 60000.0 + t.sec * 1000.0;
         base_ticks = ticks();
     }

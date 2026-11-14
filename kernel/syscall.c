@@ -100,6 +100,7 @@ static int proc_errno(int e) {
     case PROC_EISDIR:  return -EISDIR;
     case PROC_EBUSY:   return -EBUSY;
     case PROC_EACCES: return -EACCES;
+    case PROC_ELOOP:   return -ELOOP;
     default:           return e;
     }
 }
@@ -237,6 +238,27 @@ static int sys_lseek(u32 fd, u32 off, u32 whence) {
     struct file *f = get_fd(fd);
     if (!f) return -EBADF;
     return file_lseek(f, (int)off, (int)whence);
+}
+
+static int sys_pread(u32 fd, u32 buf, u32 len, u32 off) {
+    struct file *f = get_fd(fd);
+    if (!f) return -EBADF;
+    if (!user_buf_ok(buf, len, true)) return -EFAULT;
+    return file_pread(f, (void *)buf, len, off);
+}
+
+static int sys_pwrite(u32 fd, u32 buf, u32 len, u32 off) {
+    struct file *f = get_fd(fd);
+    if (!f) return -EBADF;
+    if (!user_buf_ok(buf, len, false)) return -EFAULT;
+    return file_pwrite(f, (const void *)buf, len, off);
+}
+
+static int sys_fsync(u32 fd) {
+    struct file *f = get_fd(fd);
+    if (!f) return -EBADF;
+    if (f->type == FILE_PIPE || f->type == FILE_SOCKET || f->type == FILE_LOCAL) return -EINVAL;
+    return block_flush() ? -EIO : 0;
 }
 
 static int sys_fstat(u32 fd, u32 ust) {
@@ -459,29 +481,77 @@ static int sys_rename(u32 uold, u32 unew) {
 
 /* ---------------------------------------------------------------- процессы */
 
-static int sys_image(struct regs *r, u32 upath, u32 uargv, bool create, int stdin_fd) {
+struct user_vec { char *block; char **v; int n; };
+
+/* Скопировать массив строк из памяти программы. uarray == 0 — пустой массив. */
+static int copy_user_vec(u32 uarray, struct user_vec *o) {
+    memset(o, 0, sizeof(*o));
+    o->block = kmalloc(PROC_ARG_MAX);
+    o->v = kmalloc((PROC_MAX_ARGS + 1) * sizeof(char *));
+    if (!o->block || !o->v) { kfree(o->block); kfree(o->v); o->block = NULL; o->v = NULL; return -ENOMEM; }
+    u32 used = 0;
+    int n = 0;
+    if (uarray) {
+        for (; n < PROC_MAX_ARGS; n++) {
+            u32 slot = uarray + (u32)n * 4;
+            if (!user_buf_ok(slot, 4, false)) return -EFAULT;
+            u32 s = *(u32 *)slot;
+            if (!s) break;
+            u32 start = used;
+            for (;;) {
+                if (used + 1 >= PROC_ARG_MAX) return -E2BIG;
+                if (!user_buf_ok(s, 1, false)) return -EFAULT;
+                char c = *(char *)s++;
+                o->block[used++] = c;
+                if (!c) break;
+            }
+            o->v[n] = o->block + start;
+        }
+        if (n == PROC_MAX_ARGS) {
+            u32 slot = uarray + (u32)n * 4;
+            if (!user_buf_ok(slot, 4, false)) return -EFAULT;
+            if (*(u32 *)slot) return -E2BIG;
+        }
+    }
+    o->v[n] = NULL;
+    o->n = n;
+    return 0;
+}
+
+static void user_vec_free(struct user_vec *o) {
+    if (!o) return;
+    kfree(o->block);
+    kfree(o->v);
+    o->block = NULL;
+    o->v = NULL;
+}
+
+static int sys_image(struct regs *r, u32 upath, u32 uargv, u32 uenv, bool create, int stdin_fd) {
     struct file *input = NULL;
     if (create && stdin_fd != -1) {
         if (stdin_fd < 0 || !(input=get_fd((u32)stdin_fd))) return -EBADF;
     }
-    /* Copy arguments into the kernel before loading/replacing an image. */
-    char *buf = kmalloc(PATH_MAX + (PROC_MAX_ARGS) * 256);
-    if (!buf) return -ENOMEM;
-    char *argv[PROC_MAX_ARGS + 1];
-    int argc = 0, ret;
-    if (!user_str(upath, buf, PATH_MAX)) { ret = -EFAULT; goto out; }
-    for (; argc < PROC_MAX_ARGS; argc++) {
-        u32 slot = uargv + argc * 4;
-        if (!user_buf_ok(slot, 4, false)) { ret = -EFAULT; goto out; }
-        u32 s = *(u32 *)slot;
-        if (!s) break;
-        argv[argc] = buf + PATH_MAX + argc * 256;
-        if (!user_str(s, argv[argc], 256)) { ret = -EFAULT; goto out; }
+    char path[PATH_MAX];
+    struct user_vec argv, env;
+    memset(&argv, 0, sizeof(argv));
+    memset(&env, 0, sizeof(env));
+    int ret;
+    if (!user_str(upath, path, PATH_MAX)) return -EFAULT;
+    ret = copy_user_vec(uargv, &argv);
+    if (ret) { user_vec_free(&argv); return ret; }
+    char *fallback[2];
+    char **av = argv.v;
+    int argc = argv.n;
+    if (argc == 0) { fallback[0] = path; fallback[1] = NULL; av = fallback; argc = 1; }
+    char **ev = NULL;
+    if (uenv) {
+        ret = copy_user_vec(uenv, &env);
+        if (ret) { user_vec_free(&argv); user_vec_free(&env); return ret; }
+        ev = env.v;
     }
-    if (argc == 0) argv[argc++] = buf;      /* argv[0] по умолчанию — путь */
-    ret = proc_errno(create ? proc_spawn_child(buf, argc, argv, input) : proc_exec(r, buf, argc, argv));
-out:
-    kfree(buf);
+    ret = proc_errno(create ? proc_spawn_child(path, argc, av, ev, input) : proc_exec(r, path, argc, av, ev));
+    user_vec_free(&argv);
+    user_vec_free(&env);
     return ret;
 }
 
@@ -492,7 +562,11 @@ static int sys_waitpid(i32 pid, u32 ustatus, u32 opts) {
     if (r == -1) return -ECHILD;
     if (r == -2) return -EINTR;
     if (r > 0) task_reap();                 /* сразу вернуть память ребёнка */
-    if (r > 0 && ustatus) *(int *)ustatus = code;
+    if (r > 0 && ustatus) {
+        /* Как Linux: код выхода в старшем байте, сигнал в младших семи. 128+N внутри ядра — это сигнал. */
+        int st = (code >= 128 && code < 128 + 64) ? code - 128 : (code & 0xff) << 8;
+        *(int *)ustatus = st;
+    }
     return r;
 }
 
@@ -502,6 +576,14 @@ static int sys_kill(u32 pid) {
     if (!v->user) return -EPERM;            /* потоки ядра программе не по зубам */
     if(!task_can_control(task_current(),v))return -EPERM;
     return task_kill(task_process(v)->id) == 0 ? 0 : -ESRCH;
+}
+
+static int sys_getpgid(u32 pid) {
+    struct task *t = task_process(task_current());
+    struct task *v = pid ? task_by_id(pid) : t;
+    if (!v) return -ESRCH;
+    v = task_process(v);
+    return (int)v->pgid;
 }
 
 static int sys_setpgid(u32 pid, u32 pgid) {
@@ -1161,6 +1243,9 @@ void syscall_dispatch(struct regs *r) {
     }
     case SYS_CLOSE:   ret = sys_close(a); break;
     case SYS_LSEEK:   ret = sys_lseek(a, b, c); break;
+    case SYS_PREAD:   ret = sys_pread(a, b, c, d); break;
+    case SYS_PWRITE:  ret = sys_pwrite(a, b, c, d); break;
+    case SYS_FSYNC:   ret = sys_fsync(a); break;
     case SYS_FSTAT:   ret = sys_fstat(a, b); break;
     case SYS_SBRK: { u32 f=irq_save(); ret=(int)sys_sbrk((i32)a); irq_restore(f); break; }
     case SYS_SLEEP:   sleep_ms(a); ret = 0; break;
@@ -1168,8 +1253,8 @@ void syscall_dispatch(struct regs *r) {
     case SYS_TICKS:   ret = timer_ticks() * (1000 / TIMER_HZ); break;
     case SYS_YIELD:   task_yield(); ret = 0; break;
     case SYS_FORK:    ret = proc_errno(proc_fork(r)); break;
-    case SYS_EXEC:    ret = sys_image(r, a, b, false, -1); break;
-    case SYS_SPAWN:   ret = sys_image(r, a, b, true, (int)c); break;
+    case SYS_EXEC:    ret = sys_image(r, a, b, c, false, -1); break;
+    case SYS_SPAWN:   ret = sys_image(r, a, b, 0, true, (int)c); break;
     case SYS_WAITPID: ret = sys_waitpid((i32)a, b, c); break;
     case SYS_PIPE:    ret = sys_pipe(a); break;
     case SYS_DUP2:    ret = sys_dup2(a, b); break;
@@ -1178,6 +1263,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_READDIR: ret = sys_readdir(a, b, c); break;
     case SYS_KILL:    ret = sys_kill(a); break;
     case SYS_SETPGID: ret = sys_setpgid(a, b); break;
+    case SYS_GETPGID: ret = sys_getpgid(a); break;
     case SYS_SETFG: {
         struct tty *tt = tty_of(t);
         if (tt) tt->fg = a; else proc_set_foreground(a);

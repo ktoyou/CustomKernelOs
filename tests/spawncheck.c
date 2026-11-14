@@ -35,6 +35,30 @@ static int exercise(void) {
     char data[128];memset(data,0,sizeof(data));CHECK(write(fd,data,sizeof(data))==sizeof(data));close(fd);
     CHECK(chmod("/tmp/not-elf",0755)==0); /* reach ELF validation after the execute-permission check */
     CHECK(spawn("/tmp/not-elf",args,-1)==-ENOEXEC);unlink("/tmp/not-elf");
+    fd=open("/tmp/shebang.sh",O_WRITE);CHECK(fd>=0);
+    const char *bang="#!/bin/sh\necho shebang-ok > /tmp/shebang.out\n";
+    CHECK(write(fd,bang,strlen(bang))==(int)strlen(bang));close(fd);
+    CHECK(chmod("/tmp/shebang.sh",0755)==0);
+    char *bang_args[]={"shebang.sh",NULL};
+    pid=spawn("/tmp/shebang.sh",bang_args,-1);CHECK(pid>0);
+    status=-1;CHECK(waitpid(pid,&status,0)==pid && status==0);
+    fd=open("/tmp/shebang.out",O_READ);CHECK(fd>=0);
+    char mark[16]={0};CHECK(read(fd,mark,12)==11 && !strcmp(mark,"shebang-ok\n"));close(fd);
+    unlink("/tmp/shebang.sh");unlink("/tmp/shebang.out");
+    fd=open("/tmp/bang-bad",O_WRITE);CHECK(fd>=0);
+    CHECK(write(fd,"#!\n",3)==3);close(fd);
+    CHECK(chmod("/tmp/bang-bad",0755)==0);
+    CHECK(spawn("/tmp/bang-bad",bang_args,-1)==-ENOEXEC);unlink("/tmp/bang-bad");
+    fd=open("/tmp/bang-miss",O_WRITE);CHECK(fd>=0);
+    const char *miss="#!/no/such/interp\n";
+    CHECK(write(fd,miss,strlen(miss))==(int)strlen(miss));close(fd);
+    CHECK(chmod("/tmp/bang-miss",0755)==0);
+    CHECK(spawn("/tmp/bang-miss",bang_args,-1)==-ENOENT);unlink("/tmp/bang-miss");
+    fd=open("/tmp/bang-loop",O_WRITE);CHECK(fd>=0);
+    const char *loop="#!/tmp/bang-loop\n";
+    CHECK(write(fd,loop,strlen(loop))==(int)strlen(loop));close(fd);
+    CHECK(chmod("/tmp/bang-loop",0755)==0);
+    CHECK(spawn("/tmp/bang-loop",bang_args,-1)==-ELOOP);unlink("/tmp/bang-loop");
     /* Repeated failures must not consume process slots or leak descriptor refs. */
     for(int i=0;i<40;i++) CHECK(spawn("/missing",args,-1)==-ENOENT);
     return 0;

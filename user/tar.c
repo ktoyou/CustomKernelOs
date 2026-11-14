@@ -8,13 +8,16 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include "sys/stat.h"
+#include "utime.h"
+#include "dirent.h"
 #include "zlib.h"
 
 #define NAME_CAP    1024
 #define PAX_MAX     (64 * 1024)
 
-static int opt_list, opt_gzip, opt_verbose, opt_keep, opt_absolute, opt_strip;
+static int opt_list, opt_create, opt_gzip, opt_verbose, opt_keep, opt_absolute, opt_strip;
 static const char *opt_file, *opt_dir;
+static int run_create(void);
 static char **opt_members;
 static int opt_nmem;
 
@@ -203,23 +206,25 @@ static int src_exact(struct src *s, void *buf, int n) {
 /* ------------------------------------------------------- заголовок tar */
 
 static int parse_u32(const char *p, int n, unsigned *out) {
-    unsigned v = 0;
+    unsigned long long v = 0;
     int i = 0;
     if ((unsigned char)p[0] & 0x80) {
         v = (unsigned char)p[0] & 0x7f;
         for (i = 1; i < n; i++) {
-            if (v > 0x00ffffffu) return -1;
+            if (v > 0xffffffull) return -1;
             v = (v << 8) | (unsigned char)p[i];
         }
-        *out = v;
+        if (v > 0xffffffffull) return -1;
+        *out = (unsigned)v;
         return 0;
     }
     while (i < n && (p[i] == ' ' || p[i] == 0)) i++;
     for (; i < n && p[i] >= '0' && p[i] <= '7'; i++) {
-        if (v > 0x1fffffffu) return -1;
+        if (v > 0xffffffffull / 8) return -1;
         v = (v << 3) | (unsigned)(p[i] - '0');
     }
-    *out = v;
+    if (v > 0xffffffffull) return -1;
+    *out = (unsigned)v;
     return 0;
 }
 
@@ -255,8 +260,8 @@ static int header_ok(const unsigned char *h) {
 struct saved {
     char path[NAME_CAP];
     char link[NAME_CAP];
-    int has_path, has_link, has_size;
-    unsigned size;
+    int has_path, has_link, has_size, has_mtime;
+    unsigned size, mtime;
 };
 
 static void saved_clear(struct saved *s) { memset(s, 0, sizeof *s); }
@@ -303,6 +308,14 @@ static int pax_parse(const char *body, unsigned n, struct saved *s) {
             }
             s->size = v;
             s->has_size = 1;
+        } else if (key_is(body + ks, kn, "mtime")) {
+            unsigned v = 0, j;
+            for (j = vs; j + 1 < end && body[j] >= '0' && body[j] <= '9'; j++) {
+                if (v > 0x19999999u) return -1;
+                v = v * 10u + (unsigned)(body[j] - '0');
+            }
+            s->mtime = v;
+            s->has_mtime = 1;
         }
         i = end;
     }
@@ -375,16 +388,23 @@ static int is_dir(const char *path) {
 }
 
 /* New directories stay private during extraction; apply modes inside-out. */
-struct directory_mode {char *path;unsigned mode;struct directory_mode *next;};
+struct directory_mode {char *path;unsigned mode,mtime;struct directory_mode *next;};
 static struct directory_mode *directory_modes;
 static unsigned extraction_mask;
-static void directory_header_mode(const char *path,unsigned mode) {
+static void apply_mtime(const char *path, unsigned mtime) {
+    struct utimbuf u;
+    if (!mtime) return;
+    u.actime = u.modtime = (time_t)mtime;
+    utime(path, &u);
+}
+static void directory_header_mode(const char *path,unsigned mode,unsigned mtime) {
     for(struct directory_mode *d=directory_modes;d;d=d->next)
-        if(!strcmp(d->path,path)){d->mode=mode&0777&~extraction_mask;return;}
+        if(!strcmp(d->path,path)){d->mode=mode&0777&~extraction_mask;d->mtime=mtime;return;}
 }
 static int finish_directory_modes(int success) {
     int rc=0;while(directory_modes){struct directory_mode *d=directory_modes;directory_modes=d->next;
         if(success && chmod(d->path,d->mode)<0){warn_sys(d->path,-1);rc=1;}
+        if(success) apply_mtime(d->path,d->mtime);
         free(d->path);free(d);
     }return rc;
 }
@@ -475,7 +495,7 @@ static int write_full(int fd, const void *buf, unsigned n) {
 
 /* Данные члена всегда дочитываются до конца блока, чтобы следующий заголовок не съехал.
  * -2 — обрыв архива, -1 — файл не записан. */
-static int write_member(struct src *s, const char *path, unsigned size,unsigned mode) {
+static int write_member(struct src *s, const char *path, unsigned size,unsigned mode,unsigned mtime) {
     int fd = -1, err = 0;
     unsigned rest, filled = 0;
     if (ensure_parent(path) < 0) err = -1;
@@ -497,6 +517,7 @@ static int write_member(struct src *s, const char *path, unsigned size,unsigned 
         rest -= n;
     }
     if (fd >= 0) close(fd);
+    if (!err) apply_mtime(path, mtime);
     return err;
 }
 
@@ -569,7 +590,7 @@ static int run_archive(struct src *s) {
     saved_clear(&local);
     for (;;) {
         unsigned char h[512];
-        unsigned sum_unused, size, mode;
+        unsigned sum_unused, size, mode, mtime;
         int zero = 0, ok, kind, pr;
         char name[NAME_CAP], link[NAME_CAP], dest[NAME_CAP], raw[NAME_CAP];
         const char *np, *lp;
@@ -650,6 +671,10 @@ static int run_archive(struct src *s) {
         if (local.has_size) size = local.size;
         mode = 0;
         parse_u32((const char *)h + 100, 8, &mode);
+        mtime = 0;
+        parse_u32((const char *)h + 136, 12, &mtime);
+        if (local.has_mtime) mtime = local.mtime;
+        else if (global.has_mtime) mtime = global.mtime;
         memcpy(raw, np, strlen(np) + 1);
         have_longname = have_longlink = 0;
         saved_clear(&local);
@@ -671,7 +696,7 @@ static int run_archive(struct src *s) {
         if (kind == '5') {
             if (!opt_list) {
                 if (mkdir_p(dest) < 0) rc = 1;
-                else directory_header_mode(dest,mode);
+                else directory_header_mode(dest,mode,mtime);
             }
             show('d', mode, size, dest, NULL);
             if (skip_bytes(s, size) < 0) return 1;
@@ -732,7 +757,7 @@ static int run_archive(struct src *s) {
             if (exists_keep(dest)) unlink(dest);
             show('-', mode, size, dest, NULL);
             {
-                int wr = write_member(s,dest,size,mode);
+                int wr = write_member(s,dest,size,mode,mtime);
                 if (wr == -2) { short_archive(); return 1; }
                 if (wr < 0) { warn_sys(dest, -1); rc = 1; }
             }
@@ -766,7 +791,13 @@ static int set_op(int list) {
 static int apply_short(int c, const char *arg) {
     if (c == 'x') return set_op(0);
     if (c == 't') return set_op(1);
-    if (c == 'c' || c == 'r' || c == 'u' || c == 'd' || c == 'A') {
+    if (c == 'c') {
+        if (need_op && !opt_create) { bad_op = 1; return -1; }
+        need_op = 1;
+        opt_create = 1;
+        return 0;
+    }
+    if (c == 'r' || c == 'u' || c == 'd' || c == 'A') {
         fprintf(stderr, "tar: operation '%c' is not supported\n", c);
         return -1;
     }
@@ -813,7 +844,13 @@ static int parse_long(const char *s, int *i, int argc, char **argv) {
     if (!strcmp(s, "--version")) { printf("tar (MyOS)\n"); exit(0); }
     if (!strcmp(s, "--extract") || !strcmp(s, "--get")) return set_op(0);
     if (!strcmp(s, "--list")) return set_op(1);
-    if (!strcmp(s, "--create") || !strcmp(s, "--append") || !strcmp(s, "--update") ||
+    if (!strcmp(s, "--create")) {
+        if (need_op && !opt_create) { bad_op = 1; return -1; }
+        need_op = 1;
+        opt_create = 1;
+        return 0;
+    }
+    if (!strcmp(s, "--append") || !strcmp(s, "--update") ||
         !strcmp(s, "--diff") || !strcmp(s, "--compare") || !strcmp(s, "--concatenate") ||
         !strcmp(s, "--catenate")) {
         fprintf(stderr, "tar: %s is not supported\n", s);
@@ -892,9 +929,10 @@ int main(int argc, char **argv) {
     }
     if (bad_op) { fprintf(stderr, "tar: you may not specify more than one operation\n"); return 2; }
     if (!need_op) { usage(); return 2; }
-    if (!opt_file) { fprintf(stderr, "tar: option -f is required\n"); return 2; }
     opt_members = argv + i;
     opt_nmem = argc - i;
+    if (opt_create) return run_create();
+    if (!opt_file) { fprintf(stderr, "tar: option -f is required\n"); return 2; }
     if (!strcmp(opt_file, "-")) fd = 0;
     else {
         fd = open(opt_file, O_RDONLY);
@@ -954,5 +992,176 @@ int main(int argc, char **argv) {
     rc |= finish_directory_modes(!rc);
     gz_close(gz);
     if (fd > 0) close(fd);
+    return rc ? 1 : 0;
+}
+
+/* ------------------------------------------------------- tar cf (ustar) */
+
+static int create_fd;
+
+static int create_write(const void *buf, unsigned n) {
+    const unsigned char *p = buf;
+    unsigned off = 0;
+    while (off < n) {
+        int w = write(create_fd, p + off, n - off);
+        if (w <= 0) return -1;
+        off += (unsigned)w;
+    }
+    return 0;
+}
+
+static void put_octal(char *dst, int n, unsigned long v) {
+    int i;
+    memset(dst, '0', (size_t)n);
+    dst[n - 1] = 0;
+    for (i = n - 2; i >= 0; i--) {
+        dst[i] = (char)('0' + (v & 7ul));
+        v >>= 3;
+        if (!v) break;
+    }
+}
+
+static int write_ustar(const char *name, unsigned mode, unsigned size, unsigned mtime,
+                       int type, const char *link) {
+    unsigned char h[512];
+    unsigned sum = 0;
+    int i, nlen = (int)strlen(name);
+    const char *base = name, *pref = "";
+    int plen = 0;
+    memset(h, 0, sizeof h);
+    if (nlen > 100) {
+        const char *slash = NULL;
+        for (i = 0; name[i] && i < nlen - 1; i++)
+            if (name[i] == '/' && nlen - (i + 1) <= 100 && i <= 155) slash = name + i;
+        if (!slash || slash - name > 155) {
+            fprintf(stderr, "tar: %s: name is too long\n", name);
+            return -1;
+        }
+        plen = (int)(slash - name);
+        pref = name;
+        base = slash + 1;
+        nlen = (int)strlen(base);
+    }
+    memcpy(h, base, (size_t)nlen);
+    if (plen) memcpy(h + 345, pref, (size_t)plen);
+    put_octal((char *)h + 100, 8, mode & 07777);
+    put_octal((char *)h + 108, 8, 0);
+    put_octal((char *)h + 116, 8, 0);
+    put_octal((char *)h + 124, 12, size);
+    put_octal((char *)h + 136, 12, mtime);
+    memset(h + 148, ' ', 8);
+    h[156] = (unsigned char)type;
+    if (link) {
+        int ln = (int)strlen(link);
+        if (ln > 100) { fprintf(stderr, "tar: %s: link target is too long\n", name); return -1; }
+        memcpy(h + 157, link, (size_t)ln);
+    }
+    memcpy(h + 257, "ustar", 5);
+    h[262] = 0; h[263] = '0'; h[264] = '0';
+    for (i = 0; i < 512; i++) sum += h[i];
+    put_octal((char *)h + 148, 7, sum);
+    h[155] = ' ';
+    return create_write(h, 512);
+}
+
+static int create_file(const char *path, const char *store, struct stat *st) {
+    int fd, n;
+    unsigned filled = 0, size = st->st_size;
+    if (write_ustar(store, st->st_mode, size, (unsigned)st->st_mtime, '0', NULL) < 0) return -1;
+    fd = open(path, O_RDONLY);
+    if (fd < 0) { warn_sys(path, -1); return -1; }
+    while (filled < size) {
+        unsigned char buf[4096];
+        unsigned want = size - filled;
+        if (want > sizeof buf) want = (unsigned)sizeof buf;
+        n = read(fd, buf, want);
+        if (n <= 0) { close(fd); warn_sys(path, -1); return -1; }
+        if (create_write(buf, (unsigned)n) < 0) { close(fd); return -1; }
+        filled += (unsigned)n;
+    }
+    close(fd);
+    if (size % 512u) {
+        unsigned char pad[512];
+        memset(pad, 0, sizeof pad);
+        if (create_write(pad, 512u - (size % 512u)) < 0) return -1;
+    }
+    return 0;
+}
+
+static int create_add(const char *path, const char *store);
+
+static int create_dir(const char *path, const char *store, struct stat *st) {
+    DIR *d;
+    struct dirent *de;
+    char child[NAME_CAP], child_store[NAME_CAP];
+    int slen = (int)strlen(store), rc = 0;
+    if (write_ustar(store, st->st_mode, 0, (unsigned)st->st_mtime, '5', NULL) < 0) return -1;
+    d = opendir(path);
+    if (!d) { warn_sys(path, -1); return -1; }
+    while ((de = readdir(d))) {
+        int npath, nstore;
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        npath = (int)strlen(path) + 1 + (int)strlen(de->d_name);
+        nstore = slen + 1 + (int)strlen(de->d_name);
+        if (npath >= NAME_CAP || nstore >= NAME_CAP) {
+            fprintf(stderr, "tar: name is too long\n");
+            rc = 1;
+            continue;
+        }
+        snprintf(child, sizeof child, "%s/%s", path, de->d_name);
+        if (slen && store[slen - 1] == '/')
+            snprintf(child_store, sizeof child_store, "%s%s", store, de->d_name);
+        else
+            snprintf(child_store, sizeof child_store, "%s/%s", store, de->d_name);
+        if (create_add(child, child_store) < 0) rc = 1;
+    }
+    closedir(d);
+    return rc;
+}
+
+static int create_add(const char *path, const char *store) {
+    struct stat st;
+    char link[NAME_CAP];
+    if (lstat(path, &st) < 0) { warn_sys(path, -1); return -1; }
+    if (S_ISDIR(st.st_mode)) return create_dir(path, store, &st);
+    if (S_ISLNK(st.st_mode)) {
+        int n = (int)readlink(path, link, sizeof link - 1);
+        if (n < 0) { warn_sys(path, -1); return -1; }
+        link[n] = 0;
+        return write_ustar(store, st.st_mode, 0, (unsigned)st.st_mtime, '2', link);
+    }
+    if (!S_ISREG(st.st_mode)) {
+        fprintf(stderr, "tar: %s: skipping special file\n", path);
+        return 0;
+    }
+    return create_file(path, store, &st);
+}
+
+static int run_create(void) {
+    static unsigned char zblk[1024];
+    int i, rc = 0, out;
+    if (!opt_file) { fprintf(stderr, "tar: option -f is required\n"); return 2; }
+    if (opt_nmem < 1) { fprintf(stderr, "tar: create requires a member\n"); return 2; }
+    if (!strcmp(opt_file, "-")) out = 1;
+    else {
+        out = open(opt_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (out < 0) { warn_sys(opt_file, -1); return 2; }
+    }
+    create_fd = out;
+    if (opt_dir) {
+        int cr = chdir(opt_dir);
+        if (cr < 0) {
+            warn_sys(opt_dir, cr);
+            if (out > 1) close(out);
+            return 2;
+        }
+    }
+    for (i = 0; i < opt_nmem; i++) {
+        const char *p = opt_members[i];
+        if (create_add(p, p) < 0) rc = 1;
+    }
+    memset(zblk, 0, sizeof zblk);
+    if (create_write(zblk, 1024) < 0) rc = 1;
+    if (out > 1) close(out);
     return rc ? 1 : 0;
 }

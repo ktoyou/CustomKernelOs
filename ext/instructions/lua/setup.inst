@@ -1,66 +1,8 @@
-# Lua 5.4.8, тег v5.4.8. -DLUA_USE_C89: свой разбор hex-float и без POSIX.
+# Lua 5.4.8, тег v5.4.8. Если git ещё не стоит, команда git ставит его сама.
+# -DLUA_USE_C89 в Makefile: свой разбор hex-float и без POSIX.
 name lua
 descr Lua 5.4
-workdir /tmp/ext/lua
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lprefix.h lprefix.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lua.h lua.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/luaconf.h luaconf.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lapi.h lapi.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/llimits.h llimits.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lstate.h lstate.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lobject.h lobject.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ltm.h ltm.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lzio.h lzio.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lmem.h lmem.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ldebug.h ldebug.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ldo.h ldo.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lfunc.h lfunc.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lgc.h lgc.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lstring.h lstring.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ltable.h ltable.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lundump.h lundump.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lvm.h lvm.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lauxlib.h lauxlib.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lualib.h lualib.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lcode.h lcode.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/llex.h llex.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lopcodes.h lopcodes.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lparser.h lparser.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lctype.h lctype.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ljumptab.h ljumptab.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lopnames.h lopnames.h
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lapi.c lapi.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lcode.c lcode.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lctype.c lctype.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ldebug.c ldebug.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ldo.c ldo.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ldump.c ldump.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lfunc.c lfunc.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lgc.c lgc.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/llex.c llex.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lmem.c lmem.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lobject.c lobject.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lopcodes.c lopcodes.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lparser.c lparser.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lstate.c lstate.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lstring.c lstring.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ltable.c ltable.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ltm.c ltm.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lundump.c lundump.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lvm.c lvm.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lzio.c lzio.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lauxlib.c lauxlib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lbaselib.c lbaselib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lcorolib.c lcorolib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ldblib.c ldblib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/liolib.c liolib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lmathlib.c lmathlib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/loadlib.c loadlib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/loslib.c loslib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lstrlib.c lstrlib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ltablib.c ltablib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lutf8lib.c lutf8lib.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/linit.c linit.c
-fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lua.c lua.c
+workdir /tmp/ext/lua-src
+git clone --depth 1 --branch v5.4.8 https://github.com/lua/lua.git .
 copy Makefile Makefile
 make

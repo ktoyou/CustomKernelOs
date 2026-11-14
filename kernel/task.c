@@ -194,6 +194,7 @@ static void free_task(struct task *t) {
     if (!t->leader) close_all_files(t);
     if (!t->leader && t->user && t->page_dir) { shm_release_all(t, t->page_dir); vmm_destroy_dir(t->page_dir); }
     msg_free(t);
+    kfree(t->env_buf);
     kfree(t->stack);
     kfree(t);
 }

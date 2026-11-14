@@ -802,8 +802,10 @@ void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs,
     fill_got(files, n_files, common);
 
     /* место под заголовки ELF: 52 + 2*32 = 116 байт, код с 0x80 */
-    static const unsigned char stub_myos[] = { 0xFF, 0x74, 0x24, 0x08, 0xFF, 0x74, 0x24, 0x08 };  /* ядро: _start(argc, argv) */
-    static const unsigned char stub_linux[] = { 0x8B, 0x04, 0x24, 0x8D, 0x4C, 0x24, 0x04, 0x51, 0x50 }; /* argc = [esp], argv = esp+4 */
+    /* _start(argc, argv, envp): push envp, argv, argc */
+    static const unsigned char stub_myos[] = { 0xFF, 0x74, 0x24, 0x0C, 0xFF, 0x74, 0x24, 0x0C, 0xFF, 0x74, 0x24, 0x0C };
+    /* стек Linux: argc, argv, envp. lea edx, [argv+argc*4+4] */
+    static const unsigned char stub_linux[] = { 0x8B, 0x04, 0x24, 0x8D, 0x4C, 0x24, 0x04, 0x8D, 0x54, 0x81, 0x04, 0x52, 0x51, 0x50 };
     const unsigned char *stub = opt_linux ? stub_linux : stub_myos;
     int stub_len = opt_linux ? sizeof(stub_linux) : sizeof(stub_myos);
     unsigned entry = 0x80;
@@ -1638,7 +1640,7 @@ static bool link_dyn(ObjFile **files, int n_files, ObjFile *common,
             entry_fn = st;
         }
     } else {
-        static const unsigned char stub_aux[] = { 0x8B, 0x04, 0x24, 0x8D, 0x4C, 0x24, 0x04, 0x51, 0x50 };
+        static const unsigned char stub_aux[] = { 0x8B, 0x04, 0x24, 0x8D, 0x4C, 0x24, 0x04, 0x8D, 0x54, 0x81, 0x04, 0x52, 0x51, 0x50 };
         stub = stub_aux;
         stub_len = (int)sizeof(stub_aux);
         entry_fn = start;

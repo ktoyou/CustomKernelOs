@@ -7,7 +7,7 @@ DEFAULTS={
     'CROSS':'i686-elf-' if sys.platform=='darwin' else '',
     'NASM':'nasm','QEMU':'qemu-system-i386','HOSTCC':'cc',
     'DISK':'disk.img','DISK_MB':'4096','DATA_DISK':'',
-    'QEMU_MEM':'512M','QEMU_CPUS':'4','QEMU_CPU':'','VGA':'auto','GPU':'auto',
+    'QEMU_MEM':'512M','QEMU_CPUS':'4','QEMU_CPU':'host','QEMU_ACCEL':'kvm','VGA':'auto','GPU':'auto',
     'HOST_PORT':'8080','SSH_PORT':'','USB_VIDEO':'auto','USB_ROOT_MB':'256',
     'NETBOOT_BIND':'0.0.0.0','NETBOOT_PORT':'8080','NETBOOT_URL':'',
     'NETBOOT_DIRECTORY':'build/netboot','NETBOOT_IMAGE':'build/myos-usb.img',

@@ -1,0 +1,8 @@
+rm -f /ext/bin/git
+rm -f /ext/bin/git-remote-http
+rm -f /ext/bin/git-remote-https
+rm -f /ext/bin/git-remote-ftp
+rm -f /ext/bin/git-remote-ftps
+rm -f /ext/bin/git-upload-pack
+rm -f /ext/bin/git-receive-pack
+rm -rf /ext/share/git-core

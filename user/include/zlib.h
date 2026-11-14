@@ -94,6 +94,23 @@ int deflateInit2_(z_streamp strm, int level, int method, int windowBits,
                   int memLevel, int strategy, const char *version, int stream_size);
 int deflate(z_streamp strm, int flush);
 int deflateEnd(z_streamp strm);
+typedef struct gz_header_s {
+    int text;
+    uLong time;
+    int xflags;
+    int os;
+    Bytef *extra;
+    uInt extra_len;
+    uInt extra_max;
+    Bytef *name;
+    uInt name_max;
+    Bytef *comment;
+    uInt comm_max;
+    int hcrc;
+    int done;
+} gz_header;
+typedef gz_header *gz_headerp;
+int deflateSetHeader(z_streamp strm, gz_headerp head);
 int deflateReset(z_streamp strm);
 uLong deflateBound(z_streamp strm, uLong sourceLen);
 

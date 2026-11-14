@@ -31,6 +31,11 @@ with tempfile.TemporaryDirectory() as tmp:
     assert commit+'-dirty' in generate()
     (root/'VERSION').write_text('0.19\n')
     assert '"'+commit+'"' in generate()
+    frozen=(root/'identity.h').read_text()
+    later=dict(env)
+    later.pop('SOURCE_DATE_EPOCH', None)
+    subprocess.run([sys.executable, str(script), 'identity.h'], cwd=root, env=later, check=True)
+    assert (root/'identity.h').read_text()==frozen
     (root/'new-source.c').write_text('/* untracked */')
     assert commit+'-dirty' in generate()
     # A slow status must not block the build or falsely label it clean.

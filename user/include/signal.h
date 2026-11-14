@@ -30,11 +30,24 @@ extern char *sys_siglist[NSIG];
 #define SIG_ERR ((void (*)(int))-1)
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
-void (*signal(int sig, void (*handler)(int)))(int);
-
-#ifndef sigset_t
 typedef int sigset_t;
-#endif
+void (*signal(int sig, void (*handler)(int)))(int);
+int raise(int sig);
+#define SA_NOCLDSTOP 1
+#define SA_RESTART 0x10000000
+struct sigaction {
+    void (*sa_handler)(int);
+    sigset_t sa_mask;
+    int sa_flags;
+    void (*sa_sigaction)(int, void *, void *);
+};
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
+int sigemptyset(sigset_t *set);
+int sigfillset(sigset_t *set);
+int sigaddset(sigset_t *set, int sig);
+int sigdelset(sigset_t *set, int sig);
+int sigismember(const sigset_t *set, int sig);
+
 #define SIG_BLOCK   2
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 3

@@ -11,6 +11,10 @@
  *   0xBFF00000  стек программы, 1 МиБ, растёт вниз
  *   0xBFFFFFFF  на вершине: строки аргументов, argv[], argc
  *               у программы с PT_INTERP ещё envp и auxv
+ *
+ * Файл, который начинается с #!, — скрипт. Запускается его интерпретатор,
+ * в argv попадают путь интерпретатора, необязательный аргумент из первой
+ * строки и путь самого скрипта. Цепочка скриптов ограничена четырьмя шагами.
  */
 #include "process.h"
 #include "ipc.h"
@@ -53,6 +57,8 @@ struct elf_phdr {
 #define STACK_BOTTOM USER_STACK_BOTTOM
 #define EXEC_MAX      (8u * 1024 * 1024)   /* больше в кучу ядра не читаем */
 #define EXEC_MAX_PHDR 64
+#define SHEBANG_LINE  256                  /* первая строка #! не длиннее этого */
+#define SHEBANG_DEPTH 4                    /* сколько скриптов можно вложить */
 
 static volatile u32 foreground;
 
@@ -63,6 +69,7 @@ const char *proc_strerror(int err) {
     case PROC_ENOMEM:  return "out of memory";
     case PROC_EAGAIN:  return "too many tasks";
     case PROC_EISDIR:  return "is a directory";
+    case PROC_ELOOP:   return "too many shebang interpreters";
     default:           return "error";
     }
 }
@@ -192,24 +199,98 @@ static int map_elf(u32 ino, u32 size, const struct elf_header *eh, const struct 
     return 0;
 }
 
-/* Стек для динамического загрузчика: argc, argv, пустой envp, auxv. esp кратен 16. */
-static int aux_stack(u32 dir, int argc, char **argv, struct elfmap *prog, u32 interp, u32 *sp_out) {
-    u32 sp = USER_TOP, uargv[PROC_MAX_ARGS + 1];
-    for (int i = argc - 1; i >= 0; i--) {
-        u32 len = strlen(argv[i]) + 1;
-        if (len > 256) len = 256;
-        sp -= len;
-        if (sp < STACK_BOTTOM + 1024) return PROC_ENOMEM;
-        copy_to_dir(dir, sp, argv[i], len - 1);
-        copy_to_dir(dir, sp + len - 1, "", 1);
-        uargv[i] = sp;
+static const char *default_env[] = { "PATH=/bin:/ext/bin", "HOME=/", "TERM=myos", 0 };
+
+/* Упаковать KEY=VAL в один блок ядра. vec == NULL оставляет пустое окружение. */
+static int pack_env(const char **vec, char **buf_out, u32 *len_out) {
+    u32 n = 0;
+    int count = 0;
+    if (vec) for (; vec[count]; count++) n += strlen(vec[count]) + 1;
+    char *buf = NULL;
+    if (n) {
+        buf = kmalloc(n);
+        if (!buf) return PROC_ENOMEM;
+        char *p = buf;
+        for (int i = 0; i < count; i++) {
+            u32 L = strlen(vec[i]) + 1;
+            memcpy(p, vec[i], L);
+            p += L;
+        }
     }
-    uargv[argc] = 0;
-    u32 vec[PROC_MAX_ARGS + 24];
+    *buf_out = buf;
+    *len_out = n;
+    return 0;
+}
+
+static int unpack_env(const char *buf, u32 len, char ***out, int *n_out) {
+    int count = 0;
+    for (u32 i = 0; i < len; i++) if (buf[i] == 0) count++;
+    char **vec = kmalloc((count + 1) * sizeof(char *));
+    if (!vec) return PROC_ENOMEM;
+    int k = 0;
+    u32 start = 0;
+    for (u32 i = 0; i < len; i++) if (buf[i] == 0) {
+        vec[k++] = (char *)(buf + start);
+        start = i + 1;
+    }
+    vec[k] = 0;
+    *out = vec;
+    *n_out = k;
+    return 0;
+}
+
+static void env_replace(struct task *t, char *buf, u32 len) {
+    t = task_process(t);
+    kfree(t->env_buf);
+    t->env_buf = buf;
+    t->env_len = len;
+}
+
+static int place_strings(u32 dir, u32 *sp, char **v, int n, u32 *ptrs) {
+    ptrs[n] = 0;
+    for (int i = n - 1; i >= 0; i--) {
+        u32 len = strlen(v[i]) + 1;
+        if (*sp < STACK_BOTTOM + len + 4096) return PROC_ENOMEM;
+        *sp -= len;
+        if (!copy_to_dir(dir, *sp, v[i], len)) return PROC_ENOMEM;
+        ptrs[i] = *sp;
+    }
+    return 0;
+}
+
+/* Динамическая программа: стек Linux (argc, argv, envp, auxv).
+ * Статическая: _start(argc, argv, envp), esp+4 кратен 16. */
+static int build_user_stack(u32 dir, int argc, char **argv, int envc, char **env,
+                            struct elfmap *prog, u32 interp, int with_aux, u32 *sp_out) {
+    u32 sp = USER_TOP;
+    u32 *ap = kmalloc(((u32)argc + 1) * 4);
+    u32 *ep = kmalloc(((u32)envc + 1) * 4);
+    if (!ap || !ep) { kfree(ap); kfree(ep); return PROC_ENOMEM; }
+    int err = place_strings(dir, &sp, argv, argc, ap);
+    if (!err) err = place_strings(dir, &sp, env, envc, ep);
+    if (err) { kfree(ap); kfree(ep); return err; }
+    if (!with_aux) {
+        u32 argv_addr = (sp - 4 * ((u32)argc + 1)) & ~15u;
+        u32 env_addr = (argv_addr - 4 * ((u32)envc + 1)) & ~15u;
+        if (env_addr < STACK_BOTTOM + 64 ||
+            !copy_to_dir(dir, argv_addr, ap, 4 * ((u32)argc + 1)) ||
+            !copy_to_dir(dir, env_addr, ep, 4 * ((u32)envc + 1))) {
+            kfree(ap); kfree(ep); return PROC_ENOMEM;
+        }
+        u32 frame[4] = { 0, (u32)argc, argv_addr, env_addr };
+        u32 dest = env_addr - 20;               /* dest+4 кратен 16, кадр не задевает envp */
+        if (!copy_to_dir(dir, dest, frame, sizeof(frame))) { kfree(ap); kfree(ep); return PROC_ENOMEM; }
+        *sp_out = dest;
+        kfree(ap); kfree(ep);
+        return 0;
+    }
+    int nvec = 1 + argc + 1 + envc + 1 + 14;
+    u32 *vec = kmalloc((u32)nvec * 4);
+    if (!vec) { kfree(ap); kfree(ep); return PROC_ENOMEM; }
     int n = 0;
     vec[n++] = (u32)argc;
-    for (int i = 0; i <= argc; i++) vec[n++] = uargv[i];
-    vec[n++] = 0;                                            /* envp */
+    for (int i = 0; i <= argc; i++) vec[n++] = ap[i];
+    for (int i = 0; i <= envc; i++) vec[n++] = ep[i];
     vec[n++] = AT_PHDR;   vec[n++] = prog->phdr;
     vec[n++] = AT_PHENT;  vec[n++] = sizeof(struct elf_phdr);
     vec[n++] = AT_PHNUM;  vec[n++] = prog->phnum;
@@ -219,16 +300,60 @@ static int aux_stack(u32 dir, int argc, char **argv, struct elfmap *prog, u32 in
     vec[n++] = AT_NULL;   vec[n++] = 0;
     u32 bytes = (u32)n * 4;
     u32 dest = (sp - bytes) & ~15u;
-    if (dest < STACK_BOTTOM) return PROC_ENOMEM;
-    if (!copy_to_dir(dir, dest, vec, bytes)) return PROC_ENOMEM;
-    *sp_out = dest;
-    return 0;
+    int rc = PROC_ENOMEM;
+    if (dest >= STACK_BOTTOM && copy_to_dir(dir, dest, vec, bytes)) { *sp_out = dest; rc = 0; }
+    kfree(vec); kfree(ap); kfree(ep);
+    return rc;
+}
+
+static char *kdup(const char *s) {
+    u32 n = strlen(s) + 1;
+    char *p = kmalloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+/* 0 — это не скрипт. 1 — разобрали интерпретатор. Иначе PROC_*.
+ * Необязательный аргумент — весь хвост строки одним словом, как в Linux. */
+static int parse_shebang(u32 ino, u32 size, char *interp, char *arg, bool *has_arg) {
+    char buf[SHEBANG_LINE];
+    *has_arg = false;
+    interp[0] = arg[0] = 0;
+    if (size < 2) return 0;
+    u32 n = size < SHEBANG_LINE ? size : SHEBANG_LINE;
+    if (read_exact(ino, 0, buf, n)) return PROC_ENOEXEC;
+    if (buf[0] != '#' || buf[1] != '!') return 0;
+    u32 end = 2;
+    while (end < n && buf[end] != '\n') end++;
+    if (end == n && size > n) return PROC_ENOEXEC;
+    while (end > 2 && (buf[end - 1] == ' ' || buf[end - 1] == '\t' || buf[end - 1] == '\r')) end--;
+    u32 i = 2;
+    while (i < end && (buf[i] == ' ' || buf[i] == '\t')) i++;
+    if (i >= end) return PROC_ENOEXEC;
+    u32 start = i;
+    while (i < end && buf[i] != ' ' && buf[i] != '\t') i++;
+    u32 ilen = i - start;
+    if (!ilen || ilen >= SHEBANG_LINE) return PROC_ENOEXEC;
+    memcpy(interp, buf + start, ilen);
+    interp[ilen] = 0;
+    while (i < end && (buf[i] == ' ' || buf[i] == '\t')) i++;
+    if (i < end) {
+        u32 alen = end - i;
+        if (alen >= SHEBANG_LINE) return PROC_ENOEXEC;
+        memcpy(arg, buf + i, alen);
+        arg[alen] = 0;
+        *has_arg = true;
+    }
+    return 1;
 }
 
 /* Загрузить ELF в НОВОЕ адресное пространство и положить на стек argc/argv.
  * argv — строки в памяти ядра. Файл читается кусками по 512 байт: в куче
- * ядра остаются только заголовки программы, не весь образ. */
-static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, struct image *im) {
+ * ядра остаются только заголовки программы, не весь образ.
+ * script и user_argv — то, что передал exec: при вложенном #! имя скрипта
+ * и исходные аргументы не подменяются промежуточным интерпретатором. */
+static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, char **env, struct image *im,
+                           const char *script, int user_argc, char **user_argv, int depth) {
     u32 ino;
     struct fs_stat st;
     int resolved=fs_resolve(cwd,path,&ino);
@@ -236,6 +361,33 @@ static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, str
     if(fs_stat(ino,&st))return PROC_ENOENT;
     if (st.type == FS_TYPE_DIR) return PROC_EISDIR;
     if(fs_access(ino,1,false))return PROC_EACCES;
+
+    char bang_interp[SHEBANG_LINE], bang_arg[SHEBANG_LINE];
+    bool bang_arg_set = false;
+    int bang = parse_shebang(ino, st.size, bang_interp, bang_arg, &bang_arg_set);
+    if (bang < 0) return bang;
+    if (bang > 0) {
+        if (depth >= SHEBANG_DEPTH) return PROC_ELOOP;
+        int tail = user_argc > 1 ? user_argc - 1 : 0;
+        int nargc = 2 + (bang_arg_set ? 1 : 0) + tail;
+        if (nargc > PROC_MAX_ARGS) return PROC_ENOMEM;
+        char **nav = kmalloc((u32)(nargc + 1) * sizeof(char *));
+        char *ip = kdup(bang_interp);
+        char *ap = bang_arg_set ? kdup(bang_arg) : NULL;
+        if (!nav || !ip || (bang_arg_set && !ap)) {
+            kfree(nav); kfree(ip); kfree(ap);
+            return PROC_ENOMEM;
+        }
+        int k = 0;
+        nav[k++] = ip;
+        if (bang_arg_set) nav[k++] = ap;
+        nav[k++] = (char *)script;
+        for (int i = 1; i < user_argc; i++) nav[k++] = user_argv[i];
+        nav[k] = NULL;
+        int err = load_image_impl(bang_interp, cwd, k, nav, env, im, script, user_argc, user_argv, depth + 1);
+        kfree(nav); kfree(ip); kfree(ap);
+        return err;
+    }
 
     struct elf_header eh;
     struct elf_phdr *ph = NULL, *lph = NULL;
@@ -279,6 +431,8 @@ static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, str
         goto fail;
     }
     if (argc > PROC_MAX_ARGS) argc = PROC_MAX_ARGS;
+    int envc = 0;
+    if (env) while (env[envc]) envc++;
 
     if (interp[0]) {
         u32 lino;
@@ -298,26 +452,11 @@ static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, str
         entry = lm.entry;
         u32 phys;
         if (!vmm_lookup(dir, prog.phdr, &phys, NULL)) { err = PROC_ENOEXEC; goto fail; }
-        err = aux_stack(dir, argc, argv, &prog, lm.base, &sp);
+        err = build_user_stack(dir, argc, argv, envc, env, &prog, lm.base, 1, &sp);
         if (err) goto fail;
     } else {
-        /* _start(argc, argv): адрес возврата, argc, argv. esp+4 кратен 16. */
-        u32 uargv[PROC_MAX_ARGS + 1];
-        sp = USER_TOP;
-        for (int i = argc - 1; i >= 0; i--) {
-            u32 len = strlen(argv[i]) + 1;
-            if (len > 256) len = 256;
-            sp -= len;
-            copy_to_dir(dir, sp, argv[i], len - 1);
-            copy_to_dir(dir, sp + len - 1, "", 1);
-            uargv[i] = sp;
-        }
-        uargv[argc] = 0;
-        u32 argv_addr = (sp - 4 * (argc + 1)) & ~15u;
-        copy_to_dir(dir, argv_addr, uargv, 4 * (argc + 1));
-        sp = argv_addr - 20;
-        u32 frame[3] = { 0, (u32)argc, argv_addr };
-        copy_to_dir(dir, sp, frame, sizeof(frame));
+        err = build_user_stack(dir, argc, argv, envc, env, &prog, 0, 0, &sp);
+        if (err) goto fail;
     }
 
     im->dir = dir;
@@ -338,20 +477,41 @@ fail:
 
 /* Pin the namespace while ELF headers, segments and interpreter are read.
  * Otherwise unlink/reuse between reads could substitute another owner's inode. */
-static int load_image(const char *path,u32 cwd,int argc,char **argv,struct image *im) {
-    fs_namespace_lock();int ret=load_image_impl(path,cwd,argc,argv,im);fs_namespace_unlock();return ret;
+static int load_image(const char *path,u32 cwd,int argc,char **argv,char **env,struct image *im) {
+    fs_namespace_lock();
+    int ret=load_image_impl(path,cwd,argc,argv,env,im,path,argc,argv,0);
+    fs_namespace_unlock();
+    return ret;
 }
 
-static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, struct file *log, struct file *input, struct task *parent, bool service_root) {
+static int spawn(const char *path, u32 cwd, int argc, char **argv, char **env, bool fg, struct file *log, struct file *input, struct task *parent, bool service_root) {
+    char **use = env;
+    char **owned = NULL;
+    int envc = 0;
+    if (!use && parent && task_process(parent)->env_buf) {
+        if (unpack_env(task_process(parent)->env_buf, task_process(parent)->env_len, &owned, &envc)) return PROC_ENOMEM;
+        use = owned;
+    }
+    if (!use) use = (char **)default_env;
     struct image im;
-    int err = load_image(path, cwd, argc, argv, &im);
-    if (err) return err;
+    memset(&im, 0, sizeof(im));
+    int err = load_image(path, cwd, argc, argv, use, &im);
+    char *packed = NULL;
+    u32 plen = 0;
+    if (!err) err = pack_env((const char **)use, &packed, &plen);
+    kfree(owned);
+    if (err) {
+        if (im.dir) vmm_destroy_dir(im.dir);
+        kfree(packed);
+        return err;
+    }
     struct task *t = task_alloc_user(basename(path), im.dir, im.entry, im.sp);
-    if (!t) { vmm_destroy_dir(im.dir); return PROC_ENOMEM; }
+    if (!t) { kfree(packed); vmm_destroy_dir(im.dir); return PROC_ENOMEM; }
     task_process(t)->brk_start = task_process(t)->brk = im.brk;
     task_process(t)->user_pages = im.pages;
     task_process(t)->cwd = cwd;
     task_process(t)->creation_mask=022;
+    env_replace(t, packed, plen);
     if (parent) {
         task_process(t)->uid = task_process(parent)->uid;
     task_process(t)->real_uid = task_process(parent)->real_uid;
@@ -388,15 +548,15 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
 }
 
 int proc_spawn(const char *path, u32 cwd, int argc, char **argv, bool fg) {
-    return spawn(path, cwd, argc, argv, fg, NULL, NULL, NULL, false);
+    return spawn(path, cwd, argc, argv, NULL, fg, NULL, NULL, NULL, false);
 }
 int proc_spawn_service(const char *path, int argc, char **argv, struct file *log, struct file *input, bool root) {
-    return spawn(path, FS_ROOT, argc, argv, true, log, input, NULL, root);
+    return spawn(path, FS_ROOT, argc, argv, NULL, true, log, input, NULL, root);
 }
 
-int proc_spawn_child(const char *path, int argc, char **argv, struct file *input) {
+int proc_spawn_child(const char *path, int argc, char **argv, char **env, struct file *input) {
     struct task *parent = task_process(task_current());
-    return spawn(path, task_process(parent)->cwd, argc, argv, true, NULL, input, parent, false);
+    return spawn(path, task_process(parent)->cwd, argc, argv, env, true, NULL, input, parent, false);
 }
 
 /* ---------------------------------------------------------------- fork
@@ -406,7 +566,10 @@ int proc_spawn_child(const char *path, int argc, char **argv, struct file *input
  * того же самого fork(), но получает 0, а родитель — номер потомка. */
 int proc_fork(struct regs *r) {
     struct task *parent = task_current();
-    if (parent->leader || task_has_threads(parent)) return PROC_EBUSY;
+    /* Как Linux: fork только у лидера; другие потоки в ребёнка не копируем.
+     * Раньше task_has_threads() давал EBUSY — git+libpthread не мог index-pack. */
+    if (parent->leader) return PROC_EBUSY;
+    parent = task_process(parent);
     u32 pages;
     u32 dir = vmm_clone_user(parent->page_dir, &pages);
     if (!dir) return PROC_ENOMEM;
@@ -431,6 +594,10 @@ int proc_fork(struct regs *r) {
     task_process(t)->creation_mask = task_process(parent)->user?task_process(parent)->creation_mask:022;
     task_process(t)->authenticated = task_process(parent)->authenticated;
     task_process(t)->cwd        = task_process(parent)->cwd;
+    if (parent->env_len) {
+        char *copy = kmalloc(parent->env_len);
+        if (copy) { memcpy(copy, parent->env_buf, parent->env_len); env_replace(t, copy, parent->env_len); }
+    }
     t->parent     = parent->id;
     t->pgid       = parent->pgid;
     t->tcb        = parent->tcb;
@@ -447,12 +614,30 @@ int proc_fork(struct regs *r) {
  * Заменить программу в ТЕКУЩЕМ процессе. Номер, родитель, открытые файлы и
  * текущий каталог остаются, а память — новая. Если новую программу загрузить
  * не удалось, процесс продолжает жить со старой и получает ошибку. */
-int proc_exec(struct regs *r, const char *path, int argc, char **argv) {
+int proc_exec(struct regs *r, const char *path, int argc, char **argv, char **env) {
     struct task *t = task_current();
     if (t->leader || task_has_threads(t)) return PROC_EBUSY;
+    char **use = env;
+    char **owned = NULL;
+    int envc = 0;
+    if (!use && t->env_buf) {
+        if (unpack_env(t->env_buf, t->env_len, &owned, &envc)) return PROC_ENOMEM;
+        use = owned;
+    }
+    if (!use) use = (char **)default_env;
     struct image im;
-    int err = load_image(path, task_process(t)->cwd, argc, argv, &im);
-    if (err) return err;
+    memset(&im, 0, sizeof(im));
+    int err = load_image(path, task_process(t)->cwd, argc, argv, use, &im);
+    char *packed = NULL;
+    u32 plen = 0;
+    if (!err) err = pack_env((const char **)use, &packed, &plen);
+    kfree(owned);
+    if (err) {
+        if (im.dir) vmm_destroy_dir(im.dir);
+        kfree(packed);
+        return err;
+    }
+    env_replace(t, packed, plen);
 
     for(int fd=0;fd<MAX_FDS;fd++) if(t->cloexec&(1u<<fd)) {file_close(t->fds[fd]);t->fds[fd]=NULL;}
     t->cloexec=0;

@@ -261,6 +261,10 @@ int main(int argc, char **argv) {
         /* -l ищется после разбора всех -L: место в списке библиотек запоминаем сразу */
         if (!strcmp(a, "-l") && i + 1 < argc) { push(&lnames, argv[++i]); push(&libs, NULL); continue; }
         if (!strncmp(a, "-l", 2) && a[2]) { push(&lnames, a + 2); push(&libs, NULL); continue; }
+        /* Флаги gcc, которые Makefile Git передаёт и которые на код не влияют. */
+        if (!strcmp(a, "-g") || !strncmp(a, "-g", 2) || !strncmp(a, "-O", 2) || !strncmp(a, "-W", 2) ||
+            !strncmp(a, "-m", 2) || !strncmp(a, "-std=", 5) || !strncmp(a, "-pedantic", 9) ||
+            !strcmp(a, "-pthread") || !strncmp(a, "-f", 2)) continue;
         if (a[0] == '-') usage();
         if (!first) first = a;
         if (has_suffix(a, ".o")) push(&objs, a);

@@ -38,6 +38,7 @@ struct tm *gmtime(const time_t *t);
 struct tm *localtime(const time_t *t);
 struct tm *gmtime_r(const time_t *t, struct tm *out);
 struct tm *localtime_r(const time_t *t, struct tm *out);
+char *ctime_r(const time_t *t, char *buf);
 time_t mktime(struct tm *tm);
 size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm);
 #endif

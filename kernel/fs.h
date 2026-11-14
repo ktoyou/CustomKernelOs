@@ -64,6 +64,7 @@ struct fs_stat {
     u32 size;
     u32 blocks;
     u32 mode, uid, gid, links;
+    u32 atime, mtime, ctime;
 };
 
 struct fs_dirent {
@@ -93,6 +94,8 @@ int  fs_access(u32 ino, u32 mask, bool real_ids);
 int fs_access_path(u32 cwd,const char *path,u32 mask);
 int  fs_chmod(u32 ino, u32 mode);
 int  fs_chown(u32 ino, u32 uid, u32 gid);
+int  fs_utime(u32 ino, u32 when);
+int  fs_set_size(u32 ino, u32 size);
 u32 fs_umask(u32 mask);
 /* Kernel-only, scoped account database/home maintenance; never inherited. */
 void fs_account_enter(void);

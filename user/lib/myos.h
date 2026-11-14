@@ -68,7 +68,8 @@ enum {
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ,
     SYS_SSHCTL, SYS_FSCTL, SYS_IPCCTL,
     SYS_REBOOT,
-    SYS_THREAD_CTL, SYS_HWINFO
+    SYS_THREAD_CTL, SYS_HWINFO,
+    SYS_PREAD, SYS_PWRITE, SYS_FSYNC, SYS_GETPGID
 };
 /* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
 #define TC_SET_TCB   0
@@ -84,6 +85,7 @@ struct thread_tcb {
     struct thread_key key[THREAD_KEYS];
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
+_Static_assert(SYS_HWINFO + 1 == SYS_PREAD, "SYS_PREAD follows SYS_HWINFO in kernel/syscall.h");
 _Static_assert(SYS_SSHCTL == 84, "Keep the published SYS_SSHCTL ABI stable");
 _Static_assert(SYS_FSCTL == 85, "Keep the published SYS_FSCTL ABI stable");
 _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
@@ -120,10 +122,13 @@ int *__errno_location(void);
 #define EACCES 13
 #define EFAULT 14
 #define EEXIST 17
+#define ENODEV 19
 #define ESPIPE 29
 #define ENOTDIR 20
 #define EISDIR 21
 #define EINVAL 22
+#define ENOTTY 25
+#define EDEADLK 35
 #define EDOM 33
 #define ERANGE 34
 #define EMFILE 24
@@ -131,9 +136,11 @@ int *__errno_location(void);
 #define ENOSPC 28
 #define EPIPE 32
 #define ENAMETOOLONG 36
+#define ENOLCK 37
 #define ENOTEMPTY 39
 #define ELOOP 40
 #define EMSGSIZE 90
+#define EPROTOTYPE 91
 #define EADDRINUSE 98
 #define ENETDOWN 100
 #define ECONNRESET 104
@@ -143,12 +150,23 @@ int *__errno_location(void);
 #define ECONNREFUSED 111
 #define EHOSTUNREACH 113
 #define ENOSYS 38
+#define ENXIO 6
+#define ENFILE 23
+#define EMLINK 31
+#define EOVERFLOW 75
+#define EILSEQ 84
+#define ENOTSOCK 88
 #define ENOPROTOOPT 92
 #define EPROTONOSUPPORT 93
 #define EOPNOTSUPP 95
 #define EAFNOSUPPORT 97
 #define EADDRNOTAVAIL 99
+#define ENETRESET 102
+#define ECONNABORTED 103
+#define ESHUTDOWN 108
 #define EINPROGRESS 115
+#define EWOULDBLOCK EAGAIN
+#define ENOTSUP EOPNOTSUPP
 #define EWOULDBLOCK EAGAIN
 
 #define WNOHANG 1
@@ -410,7 +428,7 @@ int   service_register(const char *name);           /* «я — служба nam
 int   service_find(const char *name);               /* -> pid службы или 0 */
 
 struct datetime { unsigned year, month, day, hour, min, sec; };
-int   get_time(struct datetime *t);                 /* часы компьютера */
+int   datetime_get(struct datetime *t);             /* часы компьютера (не get_time: так зовёт Git) */
 
 enum { UNIT_LIST, UNIT_STATUS, UNIT_START, UNIT_STOP, UNIT_RESTART,
        UNIT_ENABLE, UNIT_DISABLE, UNIT_RELOAD };

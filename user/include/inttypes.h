@@ -40,4 +40,8 @@
 #define SCNd64 "lld"
 #define SCNu64 "llu"
 #define SCNx64 "llx"
+#define SCNdMAX "lld"
+#define SCNiMAX "lli"
+#define SCNuMAX "llu"
+#define SCNxMAX "llx"
 #endif

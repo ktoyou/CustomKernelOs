@@ -64,6 +64,14 @@ int host_replace_image(const char *path, const char *neu) {
 }
 
 /* прочитать файл компьютера целиком; *len = размер */
+int host_save_file(const char *path, const void *data, unsigned len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    if (len && fwrite(data, 1, len, f) != len) { fclose(f); return -1; }
+    fclose(f);
+    return 0;
+}
+
 void *host_load_file(const char *path, unsigned *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;

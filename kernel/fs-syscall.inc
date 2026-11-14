@@ -7,6 +7,7 @@ static u32 stat_type(u32 type) {
 static int metadata_stat(u32 ino,struct file_stat_abi *out) {
     struct fs_stat st;int r=fs_stat(ino,&st);if(r)return fs_errno(r);
     memset(out,0,sizeof(*out));out->mode=stat_type(st.type)|st.mode;out->size=st.size;
+    out->atime=st.atime;out->mtime=st.mtime;out->ctime=st.ctime;
     out->uid=st.uid;out->gid=st.gid;out->dev=(ino>>24)+1;out->ino=ino;
     out->blocks=st.blocks;out->nlink=st.links;return 0;
 }
@@ -23,6 +24,29 @@ static int sys_fsctl(u32 op,u32 arg,u32 ptr) {
     if(op==11) {
         char path[PATH_MAX];if(!user_str(arg,path,sizeof(path)))return -EFAULT;
         return fs_errno(fs_create_mode(p->cwd,path,FS_TYPE_DIR,ptr,NULL));
+    }
+    if(op==12) {
+        char path[PATH_MAX];if(!user_str(arg,path,sizeof(path)))return -EFAULT;
+        fs_namespace_lock();
+        u32 ino=0;int r=fs_resolve(p->cwd,path,&ino);
+        if(!r) r=fs_utime(ino,ptr);
+        fs_namespace_unlock();
+        return fs_errno(r);
+    }
+    if(op==14) {
+        struct file *f=get_fd(arg);
+        if(!f) return -EBADF;
+        if(f->type!=FILE_DISK || !(f->mode&2)) return -EINVAL;
+        fs_namespace_lock();
+        int r=fs_set_size(f->ino,ptr);
+        fs_namespace_unlock();
+        return fs_errno(r);
+    }
+    if(op==13) {
+        if(!user_buf_ok(ptr,16,true))return -EFAULT;
+        struct fs_info info;fs_info(&info);
+        u32 out[4]={info.total_blocks,info.free_blocks,info.total_inodes,info.free_inodes};
+        memcpy((void*)ptr,out,16);return 0;
     }
     struct file *f=NULL;u32 ino=0;
     bool descriptor=op==3 || op==5 || op==7;

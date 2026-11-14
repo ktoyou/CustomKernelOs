@@ -92,6 +92,10 @@ enum {
     SYS_REBOOT,         /* reboot(RB_POWEROFF | RB_REBOOT): не возвращается */
     SYS_THREAD_CTL,     /* errno/ключи, detach, cond_wait/cond_wake; номера как в myos.h */
     SYS_HWINFO,         /* read-only PCI, USB root ports and SATA inventory */
+    SYS_PREAD,          /* pread(fd, buf, len, off): смещение дескриптора не меняется */
+    SYS_PWRITE,         /* pwrite(fd, buf, len, off) */
+    SYS_FSYNC,          /* fsync(fd): сбросить кэш блоков на диск */
+    SYS_GETPGID,        /* getpgid(pid): 0 — группа текущего процесса */
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */
@@ -105,6 +109,7 @@ enum {
 _Static_assert(SYS_SSHCTL == 84, "Keep the published SYS_SSHCTL ABI stable");
 _Static_assert(SYS_FSCTL == 85, "Keep the published SYS_FSCTL ABI stable");
 _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
+_Static_assert(SYS_HWINFO + 1 == SYS_PREAD, "SYS_PREAD follows SYS_HWINFO in user/lib/myos.h");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
 

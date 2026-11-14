@@ -4,6 +4,7 @@
 #include "stdlib.h"
 #include "unistd.h"
 #include "time.h"
+#include "sys/time.h"
 #include "sys/stat.h"
 #include "dirent.h"
 #include "libgen.h"
@@ -22,6 +23,16 @@
 #include "netdb.h"
 #include "sys/select.h"
 #include "sys/ioctl.h"
+#include "utime.h"
+#include "syslog.h"
+#include "sys/resource.h"
+#include "sys/statvfs.h"
+#include "termios.h"
+#include "grp.h"
+#include "fnmatch.h"
+#include "glob.h"
+#include "spawn.h"
+#include "sys/utsname.h"
 
 /* Filesystem administration wrappers are defined below syscall3. */
 
@@ -29,15 +40,15 @@
 
 int main(int argc, char **argv);
 
-int __libc_start(int argc, char **argv) __attribute__((noreturn));
+int __libc_start(int argc, char **argv, char **envp) __attribute__((noreturn));
 
 #if !defined(__MYOS_CC__) && !defined(__LIBC_SO__)
 /* Ядро «вызывает» _start(argc, argv): кладёт их на стек как аргументы функции.
  * (Программам, собранным cc внутри MyOS, такую же точку входа делает сам cc.
  *  В libc.so точки входа нет: её даёт crt0 самой программы.) */
 __attribute__((noreturn, used, section(".text.start")))
-void _start(int argc, char **argv) {
-    __libc_start(argc, argv);
+void _start(int argc, char **argv, char **envp) {
+    __libc_start(argc, argv, envp);
 }
 #endif
 
@@ -51,7 +62,10 @@ static int linux_metadata(int op,int arg,struct stat *st) {
     st->st_mode=*(unsigned*)(raw+16);st->st_size=*(unsigned*)(raw+44);
     st->st_uid=*(unsigned*)(raw+24);st->st_gid=*(unsigned*)(raw+28);
     st->st_ino=*(unsigned*)(raw+88);st->st_dev=*(unsigned*)raw;
-    st->st_blocks=*(unsigned*)(raw+56);st->st_nlink=*(unsigned*)(raw+20);return 0;
+    st->st_blocks=*(unsigned*)(raw+56);st->st_nlink=*(unsigned*)(raw+20);
+    st->st_atime=*(unsigned*)(raw+64);st->st_mtime=*(unsigned*)(raw+72);st->st_ctime=*(unsigned*)(raw+80);
+    st->st_atim.tv_sec=st->st_atime;st->st_mtim.tv_sec=st->st_mtime;st->st_ctim.tv_sec=st->st_ctime;
+    return 0;
 }
 /* Только для проверки cc на Linux: те же вызовы, но в номерах Linux */
 static int linux_brk;
@@ -128,18 +142,13 @@ static int syscall3(int n, int a, int b, int c) {
     case SYS_CHDIR: return __syscall(12, a);
     case SYS_GETCWD: return __syscall(183, a, b);
     case SYS_FORK:  return __syscall(2);
-    case SYS_EXEC: {
-        static char *envp[] = { 0 };
-        return __syscall(11, a, b, (int)envp);
-    }
+    case SYS_EXEC: return __syscall(11, a, b, c ? c : (int)environ);
     case SYS_PIPE: return __syscall(42, a);
+    case SYS_DUP2: return __syscall(63, a, b);
     case SYS_WAITPID: {
         int st = 0, r = __syscall(7, a, (int)&st, c);
         if (r < 0) return r;
-        if (b) {
-            int code = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff;
-            *(int *)b = code;
-        }
+        if (b) *(int *)b = st;
         return r;
     }
     case SYS_RENAME: return __syscall(38, a, b);
@@ -200,6 +209,14 @@ void exit(int code) {
     syscall3(SYS_EXIT, code, 0, 0);
     for (;;) ;
 }
+void _exit(int code) {
+#if defined(__LINUX_TEST__)
+    __syscall(1, code);
+#else
+    syscall3(SYS_EXIT, code, 0, 0);
+#endif
+    for (;;) ;
+}
 
 #undef errno
 int errno;
@@ -255,8 +272,71 @@ int open(const char *path,int flags,...) {
     unsigned a[3]={(unsigned)path,flags,mode};return ioerr(fs_call(10,0,(int)a));
 }
 int myos_open_default(const char *path,int flags){return open(path,flags,0666);}
-int   close(int fd)                              { return ioerr(syscall3(SYS_CLOSE, fd, 0, 0)); }
+static void adv_clear_fd(int fd);
+int   close(int fd) {
+    int r = ioerr(syscall3(SYS_CLOSE, fd, 0, 0));
+    if (r == 0) adv_clear_fd(fd);
+    return r;
+}
 int   lseek(int fd, long offset, int whence)     { return ioerr(syscall3(SYS_LSEEK, fd, (int)offset, whence)); }
+ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
+    if (offset < 0) { errno = EINVAL; return -1; }
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(180, fd, (int)buf, (int)count, (int)offset, 0));
+#else
+    return ioerr(syscall5(SYS_PREAD, fd, (int)buf, (int)count, (int)offset, 0));
+#endif
+}
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
+    if (offset < 0) { errno = EINVAL; return -1; }
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(181, fd, (int)buf, (int)count, (int)offset, 0));
+#else
+    return ioerr(syscall5(SYS_PWRITE, fd, (int)buf, (int)count, (int)offset, 0));
+#endif
+}
+int fsync(int fd) {
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(118, fd));
+#else
+    return ioerr(syscall3(SYS_FSYNC, fd, 0, 0));
+#endif
+}
+int fdatasync(int fd) { return fsync(fd); }
+int ftruncate(int fd, off_t length) {
+    struct stat st;
+    if (length < 0) { errno = EINVAL; return -1; }
+    if (fstat(fd, &st) < 0) return -1;
+    if ((off_t)st.st_size == length) return 0;
+    if ((off_t)st.st_size < length) {
+        char z = 0;
+        if (pwrite(fd, &z, 1, length - 1) != 1) return -1;
+        return 0;
+    }
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(93, fd, (int)length));
+#else
+    return ioerr(fs_call(14, fd, (int)length));
+#endif
+}
+int getpagesize(void) { return 4096; }
+char *getpass(const char *prompt) {
+    static char buf[128];
+    int i = 0, old = 0, have = 0;
+    if (prompt) write(2, prompt, strlen(prompt));
+    if (isatty(0)) { old = ttymode(TTY_RAW | TTY_NOSIG); have = 1; }
+    while (i + 1 < (int)sizeof buf) {
+        char c;
+        if (read(0, &c, 1) != 1) break;
+        if (c == '\r' || c == '\n' || c == 4) break;
+        if (c == 8 || c == 127) { if (i) i--; continue; }
+        buf[i++] = c;
+    }
+    buf[i] = 0;
+    if (have) ttymode(old);
+    write(2, "\n", 1);
+    return buf;
+}
 void *sbrk(int inc)                              { return (void *)syscall3(SYS_SBRK, inc, 0, 0); }
 
 struct mmap_args { unsigned addr, len, prot, flags, fd, off; };
@@ -291,18 +371,118 @@ int gettid(void) { return syscall3(SYS_GETTID,0,0,0); }
 int thread_mutex_lock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,0,0); }
 int thread_mutex_unlock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,1,0); }
 int thread_mutex_trylock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,2,0); }
-int   fork(void)                                 { return syscall3(SYS_FORK, 0, 0, 0); }
-int   exec(const char *path, char **argv)        { return syscall3(SYS_EXEC, (int)path, (int)argv, 0); }
+int   fork(void)                                 { return ioerr(syscall3(SYS_FORK, 0, 0, 0)); }
 int   execve(const char *path, char *const argv[], char *const envp[]) {
-    (void)envp; return exec(path, (char **)argv);
+    return syscall3(SYS_EXEC, (int)path, (int)argv, (int)(envp ? envp : environ));
+}
+int   exec(const char *path, char **argv)        { return execve(path, (char *const *)argv, environ); }
+int   execv(const char *path, char *const argv[]) { return execve(path, argv, environ); }
+int execvp(const char *file, char *const argv[]) {
+    const char *path, *colon;
+    int last = ENOENT;
+    if (!file || !argv) { errno = EINVAL; return -1; }
+    if (strchr(file, '/')) {
+        int r = execve(file, argv, environ);
+        if (r < 0) { errno = -r; return -1; }
+        return r;
+    }
+    path = getenv("PATH");
+    if (!path || !path[0]) path = "/bin:/ext/bin";
+    while (*path) {
+        char buf[1024];
+        int n, r;
+        colon = strchr(path, ':');
+        n = colon ? (int)(colon - path) : (int)strlen(path);
+        if (n + 2 + (int)strlen(file) < (int)sizeof buf) {
+            if (n) memcpy(buf, path, (size_t)n);
+            buf[n] = n ? '/' : 0;
+            if (!n) { memcpy(buf, file, strlen(file) + 1); }
+            else memcpy(buf + n + 1, file, strlen(file) + 1);
+            r = execve(buf, argv, environ);
+            if (r >= 0) return r;
+            last = -r;
+            if (last != ENOENT && last != EACCES && last != ENOTDIR) { errno = last; return -1; }
+        }
+        if (!colon) break;
+        path = colon + 1;
+    }
+    errno = last;
+    return -1;
+}
+static int exec_collect(char **argv, int cap, const char *arg0, va_list ap) {
+    int n = 0;
+    argv[n++] = (char *)arg0;
+    for (;;) {
+        char *a = va_arg(ap, char *);
+        if (n < cap - 1) argv[n++] = a;
+        if (!a) break;
+    }
+    argv[n < cap ? n : cap - 1] = NULL;
+    return n;
+}
+int execl(const char *path, const char *arg0, ...) {
+    char *argv[64];
+    va_list ap;
+    int r;
+    va_start(ap, arg0);
+    exec_collect(argv, 64, arg0, ap);
+    va_end(ap);
+    r = execve(path, argv, environ);
+    if (r < 0) { errno = -r; return -1; }
+    return r;
+}
+int execlp(const char *file, const char *arg0, ...) {
+    char *argv[64];
+    va_list ap;
+    va_start(ap, arg0);
+    exec_collect(argv, 64, arg0, ap);
+    va_end(ap);
+    return execvp(file, argv);
+}
+int posix_spawnp(pid_t *pid, const char *file,
+                 const posix_spawn_file_actions_t *file_actions,
+                 const posix_spawnattr_t *attrp,
+                 char *const argv[], char *const envp[]) {
+    int child;
+    (void)file_actions;
+    (void)attrp;
+    if (!pid || !file || !argv) { errno = EINVAL; return EINVAL; }
+    child = fork();
+    if (child < 0) return errno;
+    if (child == 0) {
+        if (envp) environ = (char **)envp;
+        execvp(file, argv);
+        _exit(127);
+    }
+    *pid = child;
+    return 0;
 }
 int   waitpid(int pid, int *status, int options) { return syscall3(SYS_WAITPID, pid, (int)status, options); }
 int   getppid(void)                              { return syscall3(SYS_GETPPID, 0, 0, 0); }
 int   kill(int pid, ...)                         { return syscall3(SYS_KILL, pid, 0, 0); }
 int   setpgid(int pid, int pgid)                 { return syscall3(SYS_SETPGID, pid, pgid, 0); }
+pid_t getpgid(pid_t pid) {
+#if defined(__LINUX_TEST__)
+    int r = __syscall(132, pid);
+#else
+    int r = syscall3(SYS_GETPGID, pid, 0, 0);
+#endif
+    return r < 0 ? ioerr(r) : r;
+}
+pid_t getpgrp(void) { return getpgid(0); }
+pid_t setsid(void) {
+#if defined(__LINUX_TEST__)
+    int r = __syscall(66);
+    return r < 0 ? ioerr(r) : r;
+#else
+    if (setpgid(0, 0) < 0) return -1;
+    return getpid();
+#endif
+}
 int   setfg(int pgid)                            { return syscall3(SYS_SETFG, pgid, 0, 0); }
 int   pipe(int fds[2])                           { return syscall3(SYS_PIPE, (int)fds, 0, 0); }
 int   dup2(int oldfd, int newfd)                 { return syscall3(SYS_DUP2, oldfd, newfd, 0); }
+int   dup(int fd)                                { return fcntl(fd, F_DUPFD, 0); }
 int   chdir(const char *path)                    { return syscall3(SYS_CHDIR, (int)path, 0, 0); }
 /* POSIX: успех — указатель на путь, не 0. getcwd(NULL, 0) выделяет строку:
  * bash так узнаёт текущий каталог и считает нулевой результат ошибкой. */
@@ -499,6 +679,8 @@ int isprint(int c) { return c >= 32 && c < 127; }
 int isgraph(int c) { return c > 32 && c < 127; }
 int ispunct(int c) { return isgraph(c) && !isalnum(c); }
 int abs(int x) { return x < 0 ? -x : x; }
+long labs(long x) { return x < 0 ? -x : x; }
+long long llabs(long long x) { return x < 0 ? -x : x; }
 char *strrchr(const char *s, int c) {
     const char *r = NULL;
     for (; *s; s++) if (*s == (char)c) r = s;
@@ -596,6 +778,8 @@ const char *strerror(int e) {
     default:        return "unknown error";
     }
 }
+long atol(const char *s) { return strtol(s, 0, 10); }
+long long atoll(const char *s) { return strtoll(s, 0, 10); }
 int atoi(const char *s) {
     int sign = 1, v = 0;
     while (isspace(*s)) s++;
@@ -1308,10 +1492,24 @@ void *reallocarray(void *p, size_t n, size_t size) {
 
 void *realloc(void *p, size_t n) {
     if (!p) return malloc(n);
+    thread_mutex_lock(&heap_lock);
     struct hdr *h = (struct hdr *)p - 1;
-    if (h->size >= n) return p;
-    void *q = malloc(n);
-    if (q) { memcpy(q, p, h->size); free(p); }
+    if (h->magic != HEAP_MAGIC) {
+        thread_mutex_unlock(&heap_lock);
+        errno = EINVAL;
+        return NULL;
+    }
+    if (h->size >= n) {
+        thread_mutex_unlock(&heap_lock);
+        return p;
+    }
+    size_t old = h->size;
+    void *q = malloc_unlocked(n);
+    if (q) {
+        memcpy(q, p, old);
+        free_unlocked(p);
+    }
+    thread_mutex_unlock(&heap_lock);
     return q;
 }
 
@@ -1339,6 +1537,18 @@ int socket(int domain, int type, int protocol) {
     { unsigned long a[3]; a[0] = domain; a[1] = type; a[2] = protocol; return ioerr(__syscall(102, 1, (int)a, 0)); }
 #else
     return ioerr(syscall3(SYS_SOCKET, type, 0, 0));
+#endif
+}
+int socketpair(int domain, int type, int protocol, int sv[2]) {
+    (void)protocol;
+    if (!sv) { errno = EFAULT; return -1; }
+    if (domain != AF_UNIX) { errno = EAFNOSUPPORT; return -1; }
+    if (type != SOCK_STREAM) { errno = EPROTONOSUPPORT; return -1; }
+#if defined(__LINUX_TEST__)
+    { unsigned long a[4]; a[0] = domain; a[1] = type; a[2] = protocol; a[3] = (unsigned long)sv;
+      return ioerr(__syscall(102, 8, (int)a, 0)); }
+#else
+    return ioerr(pipe(sv));
 #endif
 }
 
@@ -1847,7 +2057,8 @@ int unitctl(unsigned op, const char *name, struct unit_info *out, unsigned index
 
 int service_register(const char *name)          { return syscall3(SYS_SERVICE, 1, (int)name, 0); }
 int service_find(const char *name)              { return syscall3(SYS_SERVICE, 2, (int)name, 0); }
-int get_time(struct datetime *t)                { return syscall3(SYS_TIME, (int)t, 0, 0); }
+int datetime_get(struct datetime *t)            { return syscall3(SYS_TIME, (int)t, 0, 0); }
+int get_time(struct datetime *t)                { return datetime_get(t); } /* устар. имя */
 
 
 
@@ -2008,9 +2219,19 @@ void __libc_init(void) {
     stdused = 0;
 }
 
-int __libc_start(int argc, char **argv) {
+int __libc_start(int argc, char **argv, char **envp) {
     thread_set_tcb(&main_tcb);
     __libc_init();
+    if (envp) {
+        int n = 0;
+        while (envp[n]) n++;
+        char **copy = malloc((n + 1) * sizeof(char *));
+        if (copy) {
+            for (int i = 0; i < n; i++) copy[i] = strdup(envp[i] ? envp[i] : "");
+            copy[n] = NULL;
+            environ = copy;
+        }
+    }
     if (argc > 0 && argv && argv[0]) {
         char *s = argv[0], *b = s;
         while (*s) { if (*s == '/') b = s + 1; s++; }
@@ -2095,12 +2316,34 @@ FILE *fdopen(int fd, const char *mode) {
     return file_new(fd, acc);
 }
 
+static void memstream_sync(FILE *f) {
+    if (!f->ms_buf || !f->mem) return;
+    if (f->mem_len < 0) f->mem_len = 0;
+    if (f->mem_len >= f->mem_cap) {
+        int cap = f->mem_len + 1;
+        char *grown = realloc(f->mem, (size_t)cap);
+        if (!grown) return;
+        f->mem = grown;
+        f->mem_cap = cap;
+    }
+    f->mem[f->mem_len] = 0;
+    *f->ms_buf = f->mem;
+    if (f->ms_size) *f->ms_size = (size_t)f->mem_len;
+}
+
 int fclose(FILE *f) {
-    int r = 0;
+    int r = 0, pooled;
     if (!f) return EOF;
+    if (f->ms_buf) {
+        memstream_sync(f);
+        f->mem = NULL;
+        f->ms_buf = NULL;
+    }
     if (f->mem) { free(f->mem); f->mem = NULL; }
     if (f->fd >= 0) r = close(f->fd);
     f->fd = -1;
+    pooled = f >= stdfiles && f < stdfiles + (int)(sizeof stdfiles / sizeof stdfiles[0]);
+    if (!pooled) free(f);
     return r < 0 ? EOF : 0;
 }
 
@@ -2117,10 +2360,34 @@ FILE *fmemopen(void *buf, size_t size, const char *mode) {
     f->mem = m;
     f->mem_pos = 0;
     f->mem_len = (int)size;
+    f->mem_cap = (int)size;
     return f;
 }
 
-int fflush(FILE *f) { (void)f; return 0; }
+FILE *open_memstream(char **ptr, size_t *sizeloc) {
+    FILE *f;
+    char *m;
+    if (!ptr || !sizeloc) { errno = EINVAL; return NULL; }
+    f = file_new(-1, FF_WRITE);
+    if (!f) return NULL;
+    m = malloc(64);
+    if (!m) { fclose(f); return NULL; }
+    m[0] = 0;
+    f->mem = m;
+    f->mem_pos = 0;
+    f->mem_len = 0;
+    f->mem_cap = 64;
+    f->ms_buf = ptr;
+    f->ms_size = sizeloc;
+    *ptr = m;
+    *sizeloc = 0;
+    return f;
+}
+
+int fflush(FILE *f) {
+    if (f && f->ms_buf) memstream_sync(f);
+    return 0;
+}
 int fileno(FILE *f) { return f ? f->fd : -1; }
 int feof(FILE *f) { return f && (f->flags & FF_EOF); }
 int ferror(FILE *f) { return f && (f->flags & FF_ERR); }
@@ -2140,6 +2407,8 @@ long ftell(FILE *f) {
     int r = lseek(f->fd, 0, SEEK_CUR);
     return r < 0 ? -1 : r;
 }
+int fseeko(FILE *f, off_t off, int whence) { return fseek(f, (long)off, whence); }
+off_t ftello(FILE *f) { return ftell(f); }
 
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f) {
     __libc_init();
@@ -2171,7 +2440,35 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f) {
     int want = (int)(size * nmemb), off = 0;
     const char *s = ptr;
     while (off < want) {
-        int r = write(f->fd, s + off, (size_t)(want - off));
+        int r, chunk;
+        if (f->mem) {
+            chunk = want - off;
+            if (f->ms_buf) {
+                while (f->mem_pos > f->mem_cap - chunk - 1) {
+                    int cap = f->mem_cap > 0 ? f->mem_cap * 2 : 64;
+                    char *grown;
+                    if (cap < f->mem_pos + chunk + 1) cap = f->mem_pos + chunk + 1;
+                    if (cap < f->mem_cap) { f->flags |= FF_ERR; chunk = 0; break; }
+                    grown = realloc(f->mem, (size_t)cap);
+                    if (!grown) { f->flags |= FF_ERR; chunk = 0; break; }
+                    f->mem = grown;
+                    f->mem_cap = cap;
+                }
+            } else if (f->mem_pos >= f->mem_cap) {
+                f->flags |= FF_ERR;
+                break;
+            } else if (chunk > f->mem_cap - f->mem_pos) {
+                chunk = f->mem_cap - f->mem_pos;
+            }
+            if (chunk <= 0) break;
+            memcpy(f->mem + f->mem_pos, s + off, (size_t)chunk);
+            f->mem_pos += chunk;
+            if (f->mem_pos > f->mem_len) f->mem_len = f->mem_pos;
+            if (f->ms_buf) memstream_sync(f);
+            off += chunk;
+            continue;
+        }
+        r = write(f->fd, s + off, (size_t)(want - off));
         if (r <= 0) { f->flags |= FF_ERR; break; }
         off += r;
     }
@@ -2288,19 +2585,101 @@ ssize_t getline(char **line, size_t *n, FILE *stream) {
 mode_t umask(mode_t mask){return fs_call(9,mask,0);}
 int access(const char *path,int mode){return ioerr(fs_call(8,(int)path,mode));}
 int chmod(const char *path,mode_t mode){return ioerr(fs_call(4,(int)path,mode));}
+int mkfifo(const char *path, mode_t mode) {
+    (void)path;
+    (void)mode;
+    errno = ENOSYS;
+    return -1;
+}
 int fchmod(int fd,mode_t mode){return ioerr(fs_call(5,fd,mode));}
 int chown(const char *path,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(6,(int)path,(int)ids));}
 int fchown(int fd,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(7,fd,(int)ids));}
-int fstat(int fd,struct stat *st){return ioerr(fs_call(3,fd,(int)st));}
+static void stat_times(struct stat *st) {
+    if (!st) return;
+    st->st_atim.tv_sec = st->st_atime; st->st_atim.tv_nsec = 0;
+    st->st_mtim.tv_sec = st->st_mtime; st->st_mtim.tv_nsec = 0;
+    st->st_ctim.tv_sec = st->st_ctime; st->st_ctim.tv_nsec = 0;
+}
+int fstat(int fd,struct stat *st){int r=ioerr(fs_call(3,fd,(int)st));if(r==0)stat_times(st);return r;}
 
 char *ttyname(int fd) { (void)fd; return (char *)"/dev/tty"; }
 
 /* Ядро не хранит флаги дескриптора. F_DUPFD ищет свободный номер и делает dup2.
  * F_GETFD/F_SETFD пока ничего не запоминают: close-on-exec нет. */
+struct adv_lock { int used; unsigned dev, ino; int fd, tid, excl; };
+static struct adv_lock adv_locks[32];
+
+static void adv_clear_fd(int fd) {
+    for (int i = 0; i < 32; i++)
+        if (adv_locks[i].used && adv_locks[i].fd == fd) adv_locks[i].used = 0;
+}
+
+static int adv_probe(int fd, int excl) {
+    struct stat st;
+    if (fstat(fd, &st) < 0) return -1;
+    for (int i = 0; i < 32; i++) {
+        struct adv_lock *l = &adv_locks[i];
+        if (!l->used || l->fd == fd || l->dev != st.st_dev || l->ino != st.st_ino) continue;
+        if (excl || l->excl) return 1;
+    }
+    return 0;
+}
+
+static int adv_set(int fd, int excl, int block) {
+    struct stat st;
+    if (fstat(fd, &st) < 0) return -1;
+    int self = gettid();
+    for (;;) {
+        int holder = 0, slot = -1, mine = -1;
+        for (int i = 0; i < 32; i++) {
+            struct adv_lock *l = &adv_locks[i];
+            if (!l->used) { if (slot < 0) slot = i; continue; }
+            if (l->dev != st.st_dev || l->ino != st.st_ino) continue;
+            if (l->fd == fd) { mine = i; continue; }
+            if (excl || l->excl) holder = l->tid ? l->tid : -1;
+        }
+        if (holder) {
+            if (holder == self) { errno = EDEADLK; return -1; }
+            if (!block) { errno = EWOULDBLOCK; return -1; }
+            sleep_ms(10);
+            continue;
+        }
+        if (mine < 0 && slot < 0) { errno = ENOLCK; return -1; }
+        struct adv_lock *l = &adv_locks[mine >= 0 ? mine : slot];
+        l->used = 1; l->dev = st.st_dev; l->ino = st.st_ino;
+        l->fd = fd; l->tid = self; l->excl = excl;
+        return 0;
+    }
+}
+
+int flock(int fd, int op) {
+    int block = (op & LOCK_NB) == 0;
+    op &= ~LOCK_NB;
+    if (op == LOCK_UN) { adv_clear_fd(fd); return 0; }
+    if (op != LOCK_SH && op != LOCK_EX) { errno = EINVAL; return -1; }
+    return adv_set(fd, op == LOCK_EX, block);
+}
+
 int fcntl(int fd, int cmd, ...) {
     struct stat st;
     va_list ap;
     int arg = 0;
+    if (cmd == F_GETLK || cmd == F_SETLK || cmd == F_SETLKW) {
+        struct flock *lk;
+        va_start(ap, cmd);
+        lk = va_arg(ap, struct flock *);
+        va_end(ap);
+        if (!lk) { errno = EFAULT; return -1; }
+        if (cmd == F_GETLK) {
+            int hit = adv_probe(fd, lk->l_type == F_WRLCK);
+            if (hit < 0) return -1;
+            if (!hit) lk->l_type = F_UNLCK;
+            return 0;
+        }
+        if (lk->l_type == F_UNLCK) { adv_clear_fd(fd); return 0; }
+        if (lk->l_type != F_RDLCK && lk->l_type != F_WRLCK) { errno = EINVAL; return -1; }
+        return adv_set(fd, lk->l_type == F_WRLCK, cmd == F_SETLKW);
+    }
     if (cmd == F_SETFD || cmd == F_SETFL || cmd == F_DUPFD) {
         va_start(ap, cmd);
         arg = va_arg(ap, int);
@@ -2336,9 +2715,20 @@ int fcntl(int fd, int cmd, ...) {
     return -1;
 }
 
-int stat(const char *path,struct stat *st){return ioerr(fs_call(1,(int)path,(int)st));}
-int lstat(const char *path,struct stat *st){return ioerr(fs_call(2,(int)path,(int)st));}
+int stat(const char *path,struct stat *st){int r=ioerr(fs_call(1,(int)path,(int)st));if(r==0)stat_times(st);return r;}
+int lstat(const char *path,struct stat *st){int r=ioerr(fs_call(2,(int)path,(int)st));if(r==0)stat_times(st);return r;}
+int rmdir(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) < 0) return -1;
+    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
+    return ioerr(unlink(path));
+}
 
+int link(const char *oldpath, const char *newpath) {
+    (void)oldpath; (void)newpath;
+    errno = EPERM; /* жёстких ссылок в MyFS нет: вызывающий копирует файл */
+    return -1;
+}
 int symlink(const char *target, const char *linkpath) {
     return ioerr(syscall3(SYS_SYMLINK, (int)target, (int)linkpath, 0));
 }
@@ -2401,6 +2791,99 @@ struct dirent *readdir(DIR *dir) {
 int closedir(DIR *dir) {
     if (!dir) { errno = EBADF; return -1; }
     free(dir);
+    return 0;
+}
+
+static int glob_add(glob_t *p, const char *path) {
+    size_t n = p->gl_pathc;
+    char **v = realloc(p->gl_pathv, (n + 2) * sizeof *v);
+    char *copy;
+    if (!v) return -1;
+    p->gl_pathv = v;
+    copy = strdup(path);
+    if (!copy) return -1;
+    v[n] = copy;
+    v[n + 1] = NULL;
+    p->gl_pathc = n + 1;
+    return 0;
+}
+
+static int glob_cmp(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+void globfree(glob_t *pglob) {
+    size_t i;
+    if (!pglob || !pglob->gl_pathv) return;
+    for (i = 0; i < pglob->gl_pathc; i++) free(pglob->gl_pathv[i]);
+    free(pglob->gl_pathv);
+    pglob->gl_pathv = NULL;
+    pglob->gl_pathc = 0;
+}
+
+int glob(const char *pattern, int flags, int (*errfunc)(const char *, int), glob_t *pglob) {
+    const char *slash, *base;
+    char dirbuf[512], path[512];
+    const char *dir;
+    DIR *dp;
+    struct dirent *ent;
+    int matched = 0;
+    (void)flags;
+    (void)errfunc;
+    if (!pglob) return GLOB_NOSPACE;
+    pglob->gl_pathc = 0;
+    pglob->gl_pathv = NULL;
+    pglob->gl_offs = 0;
+    if (!pattern || !pattern[0]) return GLOB_NOMATCH;
+    if (!strpbrk(pattern, "*?[")) {
+        struct stat st;
+        if (stat(pattern, &st) != 0) return GLOB_NOMATCH;
+        return glob_add(pglob, pattern) < 0 ? GLOB_NOSPACE : 0;
+    }
+    slash = strrchr(pattern, '/');
+    if (!slash) {
+        dir = ".";
+        base = pattern;
+    } else if (slash == pattern) {
+        dir = "/";
+        base = slash + 1;
+    } else {
+        int n = (int)(slash - pattern);
+        if (n >= (int)sizeof dirbuf) return GLOB_NOSPACE;
+        memcpy(dirbuf, pattern, (size_t)n);
+        dirbuf[n] = 0;
+        dir = dirbuf;
+        base = slash + 1;
+    }
+    if (strpbrk(dir, "*?[")) return GLOB_NOMATCH;
+    dp = opendir(dir);
+    if (!dp) return GLOB_NOMATCH;
+    while ((ent = readdir(dp))) {
+        int nd, nn;
+        if (ent->d_name[0] == '.' && base[0] != '.') continue;
+        if (fnmatch(base, ent->d_name, 0) != 0) continue;
+        nd = (int)strlen(dir);
+        nn = (int)strlen(ent->d_name);
+        if (nd == 1 && dir[0] == '/') {
+            if (nn + 2 >= (int)sizeof path) continue;
+            path[0] = '/';
+            memcpy(path + 1, ent->d_name, (size_t)nn + 1);
+        } else {
+            if (nd + nn + 2 >= (int)sizeof path) continue;
+            memcpy(path, dir, (size_t)nd);
+            path[nd] = '/';
+            memcpy(path + nd + 1, ent->d_name, (size_t)nn + 1);
+        }
+        if (glob_add(pglob, path) < 0) {
+            closedir(dp);
+            globfree(pglob);
+            return GLOB_NOSPACE;
+        }
+        matched = 1;
+    }
+    closedir(dp);
+    if (!matched) return GLOB_NOMATCH;
+    qsort(pglob->gl_pathv, pglob->gl_pathc, sizeof(char *), glob_cmp);
     return 0;
 }
 
@@ -2543,6 +3026,17 @@ struct lconv *localeconv(void) {
         ready = 1;
     }
     return &lc;
+}
+int wcscmp(const wchar_t *a, const wchar_t *b) {
+    if (!a || !b) return (a != NULL) - (b != NULL);
+    while (*a && *a == *b) { a++; b++; }
+    return *a < *b ? -1 : *a > *b;
+}
+int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
+    if (!a || !b) return (a != NULL) - (b != NULL);
+    while (n && *a && *a == *b) { a++; b++; n--; }
+    if (!n) return 0;
+    return *a < *b ? -1 : *a > *b;
 }
 int mbtowc(wchar_t *wc, const char *s, size_t n) {
     if (!s) return 0;
@@ -2781,6 +3275,9 @@ double strtod(const char *nptr, char **end) {
     return sign < 0 ? -x : x;
 }
 
+float strtof(const char *nptr, char **end) { return (float)strtod(nptr, end); }
+long double strtold(const char *nptr, char **end) { return (long double)strtod(nptr, end); }
+
 long strtol(const char *nptr, char **end, int base) {
     int saved = errno;
     errno = 0;
@@ -2842,6 +3339,30 @@ char *strndup(const char *s, size_t n) {
 
 static int fold_ascii(int ch) { return (ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch; }
 
+size_t strlcpy(char *dst, const char *src, size_t n) {
+    size_t len = strlen(src);
+    if (n) {
+        size_t c = len >= n ? n - 1 : len;
+        memcpy(dst, src, c);
+        dst[c] = 0;
+    }
+    return len;
+}
+size_t strlcat(char *dst, const char *src, size_t n) {
+    size_t d = 0;
+    while (d < n && dst[d]) d++;
+    if (d == n) return d + strlen(src);
+    return d + strlcpy(dst + d, src, n - d);
+}
+void *memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen) {
+    const unsigned char *h = haystack, *nd = needle;
+    size_t i;
+    if (!needlelen) return (void *)haystack;
+    if (needlelen > haystacklen || !haystack || !needle) return NULL;
+    for (i = 0; i + needlelen <= haystacklen; i++)
+        if (!memcmp(h + i, nd, needlelen)) return (void *)(h + i);
+    return NULL;
+}
 int strcasecmp(const char *a, const char *b) {
     for (;;) {
         int ca = fold_ascii((unsigned char)*a), cb = fold_ascii((unsigned char)*b);
@@ -2964,6 +3485,98 @@ char *getenv(const char *name) {
     return NULL;
 }
 
+static int env_count(void) {
+    int n = 0;
+    if (environ) while (environ[n]) n++;
+    return n;
+}
+
+static int env_grow(int n) {
+    char **v = malloc((n + 2) * sizeof(char *));
+    if (!v) return -1;
+    for (int i = 0; i < n; i++) v[i] = environ[i];
+    v[n] = NULL;
+    v[n + 1] = NULL;
+    if (environ != empty_environ) free(environ);
+    environ = v;
+    return 0;
+}
+
+int setenv(const char *name, const char *value, int overwrite) {
+    size_t nlen, vlen;
+    int n, i;
+    char *s;
+    if (!name || !*name || strchr(name, '=')) { errno = EINVAL; return -1; }
+    if (!value) value = "";
+    nlen = strlen(name);
+    vlen = strlen(value);
+    n = env_count();
+    for (i = 0; i < n; i++) {
+        if (!strncmp(environ[i], name, nlen) && environ[i][nlen] == '=') {
+            if (!overwrite) return 0;
+            s = malloc(nlen + 1 + vlen + 1);
+            if (!s) return -1;
+            memcpy(s, name, nlen);
+            s[nlen] = '=';
+            memcpy(s + nlen + 1, value, vlen + 1);
+            free(environ[i]);
+            environ[i] = s;
+            return 0;
+        }
+    }
+    s = malloc(nlen + 1 + vlen + 1);
+    if (!s || env_grow(n)) { free(s); return -1; }
+    memcpy(s, name, nlen);
+    s[nlen] = '=';
+    memcpy(s + nlen + 1, value, vlen + 1);
+    environ[n] = s;
+    environ[n + 1] = NULL;
+    return 0;
+}
+
+int putenv(char *string) {
+    char *eq;
+    int n, i, nlen;
+    if (!string || !(eq = strchr(string, '=')) || eq == string) { errno = EINVAL; return -1; }
+    nlen = (int)(eq - string);
+    n = env_count();
+    for (i = 0; i < n; i++) {
+        if (!strncmp(environ[i], string, nlen) && environ[i][nlen] == '=') {
+            free(environ[i]);
+            environ[i] = string;
+            return 0;
+        }
+    }
+    if (env_grow(n)) return -1;
+    environ[n] = string;
+    environ[n + 1] = NULL;
+    return 0;
+}
+
+int unsetenv(const char *name) {
+    int n, i, j;
+    size_t nlen;
+    if (!name || !*name || strchr(name, '=')) { errno = EINVAL; return -1; }
+    nlen = strlen(name);
+    n = env_count();
+    for (i = 0; i < n; i++) {
+        if (!strncmp(environ[i], name, nlen) && environ[i][nlen] == '=') {
+            free(environ[i]);
+            for (j = i; j < n; j++) environ[j] = environ[j + 1];
+            return 0;
+        }
+    }
+    return 0;
+}
+
+int clearenv(void) {
+    int n = env_count(), i;
+    for (i = 0; i < n; i++) free(environ[i]);
+    if (environ != empty_environ) free(environ);
+    environ = empty_environ;
+    return 0;
+}
+
 int setvbuf(FILE *f, char *buf, int mode, size_t size) {
     (void)f; (void)buf; (void)mode; (void)size;
     return 0;
@@ -2974,11 +3587,9 @@ static int scan_isspace(int c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
 }
 
-int sscanf(const char *s, const char *fmt, ...) {
+int vsscanf(const char *s, const char *fmt, va_list ap) {
     const char *start = s;
-    va_list ap;
     int assigned = 0;
-    va_start(ap, fmt);
     while (*fmt) {
         int suppress, width, lcount;
         char conv, buf[128];
@@ -3049,8 +3660,48 @@ int sscanf(const char *s, const char *fmt, ...) {
             assigned++;
         }
     }
-    va_end(ap);
+    (void)start;
     return assigned;
+}
+int sscanf(const char *s, const char *fmt, ...) {
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    n = vsscanf(s, fmt, ap);
+    va_end(ap);
+    return n;
+}
+int fscanf(FILE *f, const char *fmt, ...) {
+    char buf[4096];
+    va_list ap;
+    int n;
+    if (!fgets(buf, (int)sizeof buf, f)) return EOF;
+    va_start(ap, fmt);
+    n = vsscanf(buf, fmt, ap);
+    va_end(ap);
+    return n;
+}
+int scanf(const char *fmt, ...) {
+    char buf[4096];
+    va_list ap;
+    int n;
+    if (!fgets(buf, (int)sizeof buf, stdin)) return EOF;
+    va_start(ap, fmt);
+    n = vsscanf(buf, fmt, ap);
+    va_end(ap);
+    return n;
+}
+int setitimer(int which, const struct itimerval *new_value, struct itimerval *old_value) {
+    (void)which; (void)new_value;
+    if (old_value) memset(old_value, 0, sizeof *old_value);
+    errno = ENOSYS;
+    return -1;
+}
+int getitimer(int which, struct itimerval *curr_value) {
+    (void)which;
+    if (curr_value) memset(curr_value, 0, sizeof *curr_value);
+    errno = ENOSYS;
+    return -1;
 }
 
 int isatty(int fd) {
@@ -3061,6 +3712,22 @@ int isatty(int fd) {
     int mode[2]={0,0};int ret=syscall3(SYS_SSHCTL,11,fd,(int)mode);
     if(ret<0){errno=-ret;return 0;}return 1;
 #endif
+}
+pid_t tcgetpgrp(int fd) {
+    int g;
+    if (!isatty(fd)) { errno = ENOTTY; return -1; }
+#if defined(__LINUX_TEST__)
+    g = __syscall(147, fd);
+    return g < 0 ? ioerr(g) : g;
+#else
+    g = ttyctl(fd, TTYCTL_GETFG, 0);
+    return g < 0 ? ioerr(g) : g;
+#endif
+}
+int tcsetpgrp(int fd, pid_t pgrp) {
+    if (!isatty(fd)) { errno = ENOTTY; return -1; }
+    (void)pgrp;
+    return 0;
 }
 
 unsigned sleep(unsigned seconds) {
@@ -3178,7 +3845,7 @@ time_t time(time_t *tloc) {
     struct datetime d;
     unsigned y;
     long long days;
-    if (get_time(&d) < 0 || d.year < 1970 || d.month < 1 || d.month > 12) return (time_t)-1;
+    if (datetime_get(&d) < 0 || d.year < 1970 || d.month < 1 || d.month > 12) return (time_t)-1;
     days = 0;
     for (y = 1970; y < d.year; y++) days += leap(y) ? 366 : 365;
     days += md[d.month - 1];
@@ -3310,6 +3977,14 @@ struct tm *gmtime_r(const time_t *tp, struct tm *out) {
 }
 
 struct tm *localtime_r(const time_t *tp, struct tm *out) { return gmtime_r(tp, out); }
+
+char *ctime_r(const time_t *tp, char *buf) {
+    struct tm tm;
+    if (!tp || !buf) { errno = EINVAL; return NULL; }
+    if (!localtime_r(tp, &tm)) return NULL;
+    if (strftime(buf, 26, "%a %b %e %H:%M:%S %Y\n", &tm) == 0) return NULL;
+    return buf;
+}
 
 struct tm *gmtime(const time_t *tp) {
     static struct tm buf;
@@ -3490,6 +4165,20 @@ size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm) {
 
 static void (*sig_handlers[32])(int);
 
+static sigset_t proc_sigmask;
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
+    if (oldset) *oldset = proc_sigmask;
+    if (!set) return 0;
+    if (how == SIG_BLOCK) proc_sigmask |= *set;
+    else if (how == SIG_UNBLOCK) proc_sigmask &= ~*set;
+    else if (how == SIG_SETMASK) proc_sigmask = *set;
+    else { errno = EINVAL; return -1; }
+    return 0;
+}
+int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
+    int r = sigprocmask(how, set, oldset);
+    return r < 0 ? errno : 0;
+}
 int sigblock(int mask) { (void)mask; return 0; }
 int sigsetmask(int mask) { (void)mask; return 0; }
 int siginterrupt(int sig, int flag) { (void)sig; (void)flag; return 0; }
@@ -3502,11 +4191,455 @@ void (*signal(int sig, void (*handler)(int)))(int) {
     return old;
 }
 
+int sigemptyset(sigset_t *set) { if (!set) { errno = EINVAL; return -1; } *set = 0; return 0; }
+int sigfillset(sigset_t *set) { if (!set) { errno = EINVAL; return -1; } *set = ~0; return 0; }
+int sigaddset(sigset_t *set, int sig) {
+    if (!set || sig <= 0 || sig >= 32) { errno = EINVAL; return -1; }
+    *set |= 1 << (sig - 1); return 0;
+}
+int sigdelset(sigset_t *set, int sig) {
+    if (!set || sig <= 0 || sig >= 32) { errno = EINVAL; return -1; }
+    *set &= ~(1 << (sig - 1)); return 0;
+}
+int sigismember(const sigset_t *set, int sig) {
+    if (!set || sig <= 0 || sig >= 32) { errno = EINVAL; return -1; }
+    return (*set & (1 << (sig - 1))) != 0;
+}
+int raise(int sig) {
+    void (*handler)(int);
+    if (sig <= 0 || sig >= 32) { errno = EINVAL; return -1; }
+    handler = sig_handlers[sig];
+    if (handler == SIG_IGN) return 0;
+    if (handler && handler != SIG_DFL) { handler(sig); return 0; }
+    exit(128 + sig);
+}
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
+    if (sig <= 0 || sig >= 32 || sig == SIGKILL || sig == SIGSTOP) { errno = EINVAL; return -1; }
+    if (old) { memset(old, 0, sizeof *old); old->sa_handler = sig_handlers[sig]; }
+    if (act) sig_handlers[sig] = act->sa_handler;
+    return 0;
+}
+
+int uname(struct utsname *name) {
+    if (!name) { errno = EFAULT; return -1; }
+    memset(name, 0, sizeof *name);
+    memcpy(name->sysname, "MyOS", 5);
+    memcpy(name->nodename, "myos", 5);
+    memcpy(name->release, "0.1", 4);
+    memcpy(name->version, "MyOS 0.1", 9);
+    memcpy(name->machine, "i386", 5);
+    return 0;
+}
+int gethostname(char *name, size_t len) {
+    struct utsname u;
+    size_t n;
+    if (!name || !len) { errno = EINVAL; return -1; }
+    if (uname(&u) < 0) return -1;
+    n = strlen(u.nodename);
+    if (n >= len) { errno = ENAMETOOLONG; return -1; }
+    memcpy(name, u.nodename, n + 1);
+    return 0;
+}
+
+int utime(const char *path, const struct utimbuf *times) {
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(30, (int)path, (int)times));
+#else
+    unsigned when = times ? (unsigned)times->modtime : 0;
+    return ioerr(fs_call(12, (int)path, (int)when));
+#endif
+}
+
+int getrlimit(int resource, struct rlimit *rlim) {
+    if (!rlim) { errno = EFAULT; return -1; }
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(76, resource, (int)rlim));
+#else
+    if (resource != RLIMIT_NOFILE) { errno = EINVAL; return -1; }
+    rlim->rlim_cur = rlim->rlim_max = 16;
+    return 0;
+#endif
+}
+int getrusage(int who, struct rusage *usage) {
+    if (!usage) { errno = EFAULT; return -1; }
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(77, who, (int)usage));
+#else
+    (void)who;
+    memset(usage, 0, sizeof *usage);
+    return 0;
+#endif
+}
+int setrlimit(int resource, const struct rlimit *rlim) {
+    if (!rlim) { errno = EFAULT; return -1; }
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(75, resource, (int)rlim));
+#else
+    if (resource != RLIMIT_NOFILE) { errno = EINVAL; return -1; }
+    if (rlim->rlim_cur > 16 || rlim->rlim_max > 16) { errno = EPERM; return -1; }
+    return 0;
+#endif
+}
+
+static int vfs_fill(struct statvfs *buf) {
+    unsigned info[4];
+    int r = fs_call(13, 0, (int)info);
+    if (r < 0) { errno = -r; return -1; }
+    memset(buf, 0, sizeof *buf);
+    buf->f_bsize = buf->f_frsize = 512;
+    buf->f_blocks = info[0];
+    buf->f_bfree = buf->f_bavail = info[1];
+    buf->f_files = info[2];
+    buf->f_ffree = buf->f_favail = info[3];
+    buf->f_namemax = 255;
+    return 0;
+}
+int statvfs(const char *path, struct statvfs *buf) {
+    struct stat st;
+    if (!path || !buf) { errno = EFAULT; return -1; }
+    if (stat(path, &st) < 0) return -1;
+#if defined(__LINUX_TEST__)
+    long raw[16];
+    int r = __syscall(99, (int)path, (int)raw);
+    if (r < 0) { errno = -r; return -1; }
+    memset(buf, 0, sizeof *buf);
+    buf->f_bsize = (unsigned long)raw[1];
+    buf->f_blocks = (unsigned long)raw[2];
+    buf->f_bfree = (unsigned long)raw[3];
+    buf->f_bavail = (unsigned long)raw[4];
+    buf->f_files = (unsigned long)raw[5];
+    buf->f_ffree = (unsigned long)raw[6];
+    buf->f_namemax = (unsigned long)raw[9];
+    buf->f_frsize = raw[10] ? (unsigned long)raw[10] : buf->f_bsize;
+    return 0;
+#else
+    (void)st;
+    return vfs_fill(buf);
+#endif
+}
+int fstatvfs(int fd, struct statvfs *buf) {
+    struct stat st;
+    if (fstat(fd, &st) < 0) return -1;
+#if defined(__LINUX_TEST__)
+    long raw[16];
+    int r = __syscall(100, fd, (int)raw);
+    if (r < 0) { errno = -r; return -1; }
+    memset(buf, 0, sizeof *buf);
+    buf->f_bsize = (unsigned long)raw[1];
+    buf->f_blocks = (unsigned long)raw[2];
+    buf->f_bfree = (unsigned long)raw[3];
+    buf->f_bavail = (unsigned long)raw[4];
+    buf->f_namemax = 255;
+    return 0;
+#else
+    (void)st;
+    return vfs_fill(buf);
+#endif
+}
+
+int tcgetattr(int fd, struct termios *t) {
+    if (!t) { errno = EFAULT; return -1; }
+    if (!isatty(fd)) { errno = ENOTTY; return -1; }
+    memset(t, 0, sizeof *t);
+    t->c_iflag = ICRNL | IXON;
+    t->c_oflag = OPOST | ONLCR;
+    t->c_cflag = CS8 | CREAD;
+    t->c_lflag = ISIG | ICANON | ECHO | ECHOE | IEXTEN;
+#if !defined(__LINUX_TEST__)
+    int mode = ttyctl(fd, TTYCTL_GETMODE, 0);
+    if (mode >= 0) {
+        if (mode & TTY_RAW) t->c_lflag &= ~(unsigned)(ICANON | ECHO | ECHOE);
+        if (mode & TTY_NOSIG) t->c_lflag &= ~(unsigned)ISIG;
+    }
+#endif
+    t->c_cc[VINTR] = 3;
+    t->c_cc[VERASE] = 127;
+    t->c_cc[VMIN] = 1;
+    return 0;
+}
+int tcsetattr(int fd, int optional_actions, const struct termios *t) {
+    (void)optional_actions;
+    if (!t) { errno = EFAULT; return -1; }
+    if (!isatty(fd)) { errno = ENOTTY; return -1; }
+#if !defined(__LINUX_TEST__)
+    int mode = ttyctl(fd, TTYCTL_GETMODE, 0);
+    if (mode < 0) mode = 0;
+    mode &= ~(TTY_RAW | TTY_NOSIG);
+    if (!(t->c_lflag & ICANON)) mode |= TTY_RAW;
+    if (!(t->c_lflag & ISIG)) mode |= TTY_NOSIG;
+    ttymode(mode);
+#else
+    (void)t;
+#endif
+    return 0;
+}
+int tcflush(int fd, int queue) {
+    (void)queue;
+    if (!isatty(fd)) { errno = ENOTTY; return -1; }
+    errno = ENOSYS;
+    return -1;
+}
+int cfsetospeed(struct termios *t, speed_t speed) { if (!t) { errno = EFAULT; return -1; } t->c_ospeed = speed; return 0; }
+int cfsetispeed(struct termios *t, speed_t speed) { if (!t) { errno = EFAULT; return -1; } t->c_ispeed = speed; return 0; }
+speed_t cfgetospeed(const struct termios *t) { return t ? t->c_ospeed : 0; }
+speed_t cfgetispeed(const struct termios *t) { return t ? t->c_ispeed : 0; }
+
+static char log_ident[64];
+void openlog(const char *ident, int option, int facility) {
+    (void)option; (void)facility;
+    log_ident[0] = 0;
+    if (ident) snprintf(log_ident, sizeof log_ident, "%s", ident);
+}
+void syslog(int priority, const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    (void)priority;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (log_ident[0]) dprintf(2, "%s: %s\n", log_ident, buf);
+    else dprintf(2, "%s\n", buf);
+}
+void closelog(void) { log_ident[0] = 0; }
+
+struct group *getgrgid(gid_t gid) { (void)gid; errno = ENOENT; return NULL; }
+struct group *getgrnam(const char *name) { (void)name; errno = ENOENT; return NULL; }
+struct group *getgrent(void) { errno = ENOENT; return NULL; }
+void setgrent(void) {}
+void endgrent(void) {}
+int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups) {
+    (void)user;
+    if (!ngroups) { errno = EINVAL; return -1; }
+    if (!groups || *ngroups < 1) { *ngroups = 1; errno = EINVAL; return -1; }
+    groups[0] = group;
+    *ngroups = 1;
+    return 1;
+}
+int setgroups(size_t size, const gid_t *list) {
+    (void)size;
+    (void)list;
+    return 0;
+}
+int initgroups(const char *user, gid_t group) {
+    gid_t groups[32];
+    int n = 32;
+    if (getgrouplist(user, group, groups, &n) < 0) return -1;
+    return setgroups((size_t)n, groups);
+}
+
+static int fill_temp(char *x, unsigned *state) {
+    unsigned v = *state = *state * 1664525u + 1013904223u;
+    for (int i = 0; i < 6; i++) {
+        x[i] = "0123456789abcdefghijklmnopqrstuvwxyz"[v % 36];
+        v /= 36;
+    }
+    return 0;
+}
+static char *temp_xs(char *template) {
+    size_t n;
+    char *x;
+    if (!template) { errno = EINVAL; return NULL; }
+    n = strlen(template);
+    if (n < 6) { errno = EINVAL; return NULL; }
+    x = template + n - 6;
+    for (int i = 0; i < 6; i++) if (x[i] != 'X') { errno = EINVAL; return NULL; }
+    return x;
+}
+char *mkdtemp(char *template) {
+    char *x = temp_xs(template);
+    unsigned state;
+    if (!x) return NULL;
+    state = (unsigned)getpid() * 2246822519u + 1u;
+    for (int attempt = 0; attempt < 256; attempt++) {
+        fill_temp(x, &state);
+        if ((mkdir)(template, 0700) == 0) return template;
+        if (errno != EEXIST) return NULL;
+    }
+    errno = EEXIST;
+    return NULL;
+}
+int mkstemp(char *template) {
+    size_t n;
+    unsigned state;
+    char *x;
+    if (!template) { errno = EINVAL; return -1; }
+    n = strlen(template);
+    if (n < 6) { errno = EINVAL; return -1; }
+    x = template + n - 6;
+    for (int i = 0; i < 6; i++) if (x[i] != 'X') { errno = EINVAL; return -1; }
+    state = (unsigned)getpid() * 2654435761u + 1u;
+    for (int attempt = 0; attempt < 256; attempt++) {
+        unsigned v = state = state * 1664525u + 1013904223u + (unsigned)attempt;
+        for (int i = 0; i < 6; i++) {
+            x[i] = "0123456789abcdefghijklmnopqrstuvwxyz"[v % 36];
+            v /= 36;
+        }
+        int fd = open(template, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) return fd;
+        if (errno != EEXIST) return -1;
+    }
+    errno = EEXIST;
+    return -1;
+}
+
+char *realpath(const char *path, char *resolved) {
+    char cur[1024], link[1024], out[1024];
+    struct stat st;
+    int hops = 0;
+    if (!path || !path[0]) { errno = EINVAL; return NULL; }
+    if (path[0] == '/') {
+        if (strlen(path) >= sizeof cur) { errno = ENAMETOOLONG; return NULL; }
+        memcpy(cur, path, strlen(path) + 1);
+    } else {
+        if (!getcwd(cur, sizeof cur)) return NULL;
+        if (strlen(cur) + strlen(path) + 2 > sizeof cur) { errno = ENAMETOOLONG; return NULL; }
+        if (cur[0] && cur[strlen(cur) - 1] != '/') strcat(cur, "/");
+        strcat(cur, path);
+    }
+    for (;;) {
+        int i = 0, oi = 0, saw = 0;
+        out[0] = 0;
+        if (cur[0] == '/') { out[oi++] = '/'; out[oi] = 0; i = 1; }
+        while (cur[i]) {
+            int start, cl;
+            while (cur[i] == '/') i++;
+            if (!cur[i]) break;
+            start = i;
+            while (cur[i] && cur[i] != '/') i++;
+            cl = i - start;
+            if (cl == 1 && cur[start] == '.') continue;
+            if (cl == 2 && cur[start] == '.' && cur[start + 1] == '.') {
+                if (oi > 1) {
+                    while (oi > 1 && out[oi - 1] != '/') oi--;
+                    if (oi > 1) oi--;
+                    if (oi < 1) oi = 1;
+                    out[oi] = 0;
+                }
+                continue;
+            }
+            if (oi > 1) out[oi++] = '/';
+            if (oi + cl >= (int)sizeof out) { errno = ENAMETOOLONG; return NULL; }
+            memcpy(out + oi, cur + start, (size_t)cl);
+            oi += cl;
+            out[oi] = 0;
+            if (lstat(out, &st) < 0) return NULL;
+            if (!S_ISLNK(st.st_mode)) continue;
+            if (++hops > 40) { errno = ELOOP; return NULL; }
+            {
+                int n = (int)readlink(out, link, sizeof link - 1);
+                char rest[1024];
+                if (n < 0) return NULL;
+                link[n] = 0;
+                if (strlen(cur + i) >= sizeof rest) { errno = ENAMETOOLONG; return NULL; }
+                memcpy(rest, cur + i, strlen(cur + i) + 1);
+                if (link[0] == '/') {
+                    if (strlen(link) + strlen(rest) >= sizeof cur) { errno = ENAMETOOLONG; return NULL; }
+                    memcpy(cur, link, strlen(link) + 1);
+                    strcat(cur, rest);
+                } else {
+                    char dir[1024];
+                    char *sl;
+                    memcpy(dir, out, strlen(out) + 1);
+                    sl = strrchr(dir, '/');
+                    if (sl && sl != dir) *sl = 0;
+                    else if (sl) sl[1] = 0;
+                    if (snprintf(cur, sizeof cur, "%s%s%s%s", dir, dir[strlen(dir) - 1] == '/' ? "" : "/", link, rest) >= (int)sizeof cur) {
+                        errno = ENAMETOOLONG; return NULL;
+                    }
+                }
+            }
+            saw = 1;
+            break;
+        }
+        if (saw) continue;
+        if (!out[0]) { errno = ENOENT; return NULL; }
+        if (lstat(out, &st) < 0) return NULL;
+        {
+            char *dst = resolved ? resolved : malloc(strlen(out) + 1);
+            if (!dst) return NULL;
+            memcpy(dst, out, strlen(out) + 1);
+            return dst;
+        }
+    }
+}
+
+static int fnm_class(const char **pat, char c) {
+    const char *p = *pat;
+    int neg = 0, ok = 0;
+    if (*p == '!' || *p == '^') { neg = 1; p++; }
+    if (*p == ']') { if (c == ']') ok = 1; p++; }
+    while (*p && *p != ']') {
+        if (p[1] == '-' && p[2] && p[2] != ']') {
+            if (c >= p[0] && c <= p[2]) ok = 1;
+            p += 3;
+        } else {
+            if (c == *p) ok = 1;
+            p++;
+        }
+    }
+    if (*p != ']') return -1;
+    *pat = p + 1;
+    return ok != neg;
+}
+static int fnm_period(const char *str, const char *base, int flags) {
+    if (!(flags & FNM_PERIOD) || *str != '.') return 0;
+    if (str == base) return 1;
+    return (flags & FNM_PATHNAME) && str > base && str[-1] == '/';
+}
+static int fnm_rec(const char *pat, const char *str, const char *base, int flags) {
+    while (*pat) {
+        if (!(flags & FNM_NOESCAPE) && *pat == '\\' && pat[1]) {
+            if (*str != pat[1]) return FNM_NOMATCH;
+            pat += 2; str++;
+            continue;
+        }
+        if (*pat == '*') {
+            if (fnm_period(str, base, flags)) return FNM_NOMATCH;
+            while (*pat == '*') pat++;
+            if (!*pat) {
+                if ((flags & FNM_PATHNAME) && strchr(str, '/')) return FNM_NOMATCH;
+                return 0;
+            }
+            for (;;) {
+                if (fnm_rec(pat, str, base, flags & ~FNM_PERIOD) == 0) return 0;
+                if (!*str || ((flags & FNM_PATHNAME) && *str == '/')) break;
+                str++;
+            }
+            return FNM_NOMATCH;
+        }
+        if (*pat == '?') {
+            if (fnm_period(str, base, flags) || !*str || ((flags & FNM_PATHNAME) && *str == '/'))
+                return FNM_NOMATCH;
+            pat++; str++;
+            continue;
+        }
+        if (*pat == '[') {
+            int m;
+            if (fnm_period(str, base, flags) || !*str || ((flags & FNM_PATHNAME) && *str == '/'))
+                return FNM_NOMATCH;
+            pat++;
+            m = fnm_class(&pat, *str);
+            if (m <= 0) return FNM_NOMATCH;
+            str++;
+            continue;
+        }
+        if (*pat != *str) return FNM_NOMATCH;
+        pat++;
+        if (!*str) return *pat ? FNM_NOMATCH : 0;
+        str++;
+    }
+    return *str ? FNM_NOMATCH : 0;
+}
+int fnmatch(const char *pattern, const char *string, int flags) {
+    if (!pattern || !string) { errno = EINVAL; return FNM_NOMATCH; }
+    return fnm_rec(pattern, string, string, flags);
+}
+
 int system(const char *cmd) {
     int pid, st = 0;
     char *av[4];
     if (!cmd) return 1;
-    if (strlen(cmd) >= 256) { errno = EINVAL; return -1; }
+    if (strlen(cmd) >= 64 * 1024) { errno = EINVAL; return -1; }
     pid = fork();
     if (pid < 0) { errno = -pid; return -1; }
     if (pid == 0) {

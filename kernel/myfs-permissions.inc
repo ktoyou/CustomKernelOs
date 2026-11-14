@@ -101,3 +101,67 @@ int myfs_setattr(u32 ino,u32 mode,u32 uid,u32 gid) {
     if(in.type==FS_TYPE_FREE)return FS_ENOENT;
     return permissions_store(ino,mode,uid,gid);
 }
+
+/* Время файла — отдельная разреженная таблица. Ноль значит «ещё не записано». */
+#define TIMES_PER_BLOCK (BS / 4)
+static int times_block(u32 ino,bool alloc,u32 *out) {
+    int ret;*out=0;
+    if(!sb.times_root) {
+        if(!alloc)return 0;
+        u32 root=balloc();if(!root)return FS_ENOSPC;
+        if((ret=write_zero_block(root)) || (ret=bitmap_flush())){bfree(root);return ret;}
+        struct superblock old=sb;sb.times_root=root;
+        if(bwrite(0,&sb)){sb=old;bfree(root);return FS_EIO;}
+    }
+    u32 pointers[NINDIRECT];
+    u32 index=ino/TIMES_PER_BLOCK;
+    if(index/NINDIRECT>=NINDIRECT)return FS_EINVAL;
+    ret=permissions_read(sb.times_root,pointers);if(ret)return ret;
+    u32 leaf=pointers[index/NINDIRECT];
+    if(!leaf) {
+        if(!alloc)return 0;
+        leaf=balloc();if(!leaf)return FS_ENOSPC;
+        if((ret=write_zero_block(leaf))){bfree(leaf);return ret;}
+        pointers[index/NINDIRECT]=leaf;
+        if((ret=permissions_write(sb.times_root,pointers))){bfree(leaf);return ret;}
+    }
+    if((ret=permissions_read(leaf,pointers)))return ret;
+    u32 block=pointers[index%NINDIRECT];
+    if(!block && alloc) {
+        block=balloc();if(!block)return FS_ENOSPC;
+        if((ret=write_zero_block(block))){bfree(block);return ret;}
+        pointers[index%NINDIRECT]=block;
+        if((ret=permissions_write(leaf,pointers))){bfree(block);return ret;}
+    }
+    *out=block;return 0;
+}
+#ifdef HOST_TEST
+static u32 kern_now(void) { return 1; }
+#else
+static u32 kern_now(void) {
+    struct rtc_time t;rtc_read(&t);
+    static const unsigned md[12]={0,31,59,90,120,151,181,212,243,273,304,334};
+    if(t.year<1970 || t.month<1 || t.month>12) return 0;
+    u32 days=0;
+    for(u32 y=1970;y<t.year;y++) days+=(y%4==0 && (y%100!=0 || y%400==0))?366:365;
+    days+=md[t.month-1];
+    if(t.month>2 && (t.year%4==0 && (t.year%100!=0 || t.year%400==0))) days++;
+    days+=t.day?t.day-1:0;
+    return days*86400u + t.hour*3600u + t.min*60u + t.sec;
+}
+#endif
+static int times_store(u32 ino,u32 when) {
+    u32 block;int ret=times_block(ino,true,&block);if(ret)return ret;
+    u32 rec[TIMES_PER_BLOCK];
+    if((ret=permissions_read(block,rec)))return ret;
+    rec[ino%TIMES_PER_BLOCK]=when?when:1;
+    return permissions_write(block,rec);
+}
+static u32 times_load(u32 ino) {
+    u32 block;if(times_block(ino,false,&block) || !block) return 0;
+    u32 rec[TIMES_PER_BLOCK];
+    if(permissions_read(block,rec)) return 0;
+    return rec[ino%TIMES_PER_BLOCK];
+}
+int myfs_touch(u32 ino) { return times_store(ino,kern_now()); }
+int myfs_set_time(u32 ino, u32 when) { return times_store(ino, when ? when : kern_now()); }

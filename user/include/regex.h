@@ -21,6 +21,7 @@ typedef struct {
 
 #define REG_NOTBOL 1
 #define REG_NOTEOL 2
+#define REG_STARTEND 4
 
 #define REG_NOMATCH  1
 #define REG_BADPAT   2

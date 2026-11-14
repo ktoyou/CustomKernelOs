@@ -16,6 +16,8 @@
  *   mkdir <путь>            создать каталог, в том числе вложенный
  *   depend <имя>            сначала поставить этот пакет, если его ещё нет
  *   fetch [-r N] <url> [куда]
+ *   git <аргументы git>     /ext/bin/git или /bin/git. Если файла нет,
+ *                           сначала выполняется ext install git, как depend git
  *   tar <аргументы tar>     /bin/tar, в том числе xzf для tar.gz
  *   make [аргументы]        /bin/make
  *   cc <аргументы cc>
@@ -29,6 +31,7 @@
  * Отметка снимается только после успешного uninstall.inst.
  */
 #include "myos.h"
+#include "sys/wait.h"
 #include "stdio.h"
 #include "dirent.h"
 #include "build_jobs.h"
@@ -109,7 +112,7 @@ static int run_prog(const char *path, char **argv) {
         exit(127);
     }
     if (waitpid(pid, &st, 0) < 0) return 1;
-    return st;
+    return WIFSIGNALED(st) ? 128 + WTERMSIG(st) : WEXITSTATUS(st);
 }
 
 static int cmd_fetch(int argc, char **argv) {
@@ -170,6 +173,7 @@ static int install_name(const char *dir, const char *name);
 static int cmd_copy(const char *pkg, int argc, char **argv);
 static int cmd_patch(const char *pkg, int argc, char **argv);
 static int cmd_rm(int argc, char **argv);
+static int cmd_git(const char *root, int argc, char **argv);
 
 static int exec_args(const char *root, const char *pkg, int argc, char **argv) {
     int r;
@@ -194,6 +198,7 @@ static int exec_args(const char *root, const char *pkg, int argc, char **argv) {
         return 0;
     }
     if (!strcmp(argv[0], "fetch")) return cmd_fetch(argc, argv);
+    if (!strcmp(argv[0], "git")) return cmd_git(root, argc, argv);
     if (!strcmp(argv[0], "tar")) {
         if (argc < 2) { dprintf(STDERR, "ext: tar: arguments required\n"); return 1; }
         return cmd_tool("/bin/tar", argc, argv);
@@ -718,6 +723,54 @@ static int cmd_patch(const char *pkg, int argc, char **argv) {
     return apply_patch(src, strip);
 }
 
+#if defined(__LINUX_TEST__)
+static int git_hide_system;
+static const char *git_test_bin;
+#endif
+
+static int regular_file(const char *path) {
+    struct dirent_info st;
+    return path && dirstat(path, &st) == 0 && st.type == 1;
+}
+
+static const char *git_program(void) {
+#if defined(__LINUX_TEST__)
+    if (git_test_bin) {
+        if (regular_file(git_test_bin)) return git_test_bin;
+        if (git_hide_system) return NULL;
+    } else if (git_hide_system) return NULL;
+#endif
+    if (regular_file("/ext/bin/git")) return "/ext/bin/git";
+    if (regular_file("/bin/git")) return "/bin/git";
+    return NULL;
+}
+
+static int cmd_git(const char *root, int argc, char **argv) {
+    char cwd[512];
+    const char *bin;
+    int r;
+    if (argc < 2) { dprintf(STDERR, "ext: git: arguments required\n"); return 1; }
+    bin = git_program();
+    if (!bin) {
+        if (!getcwd(cwd, sizeof cwd)) {
+            dprintf(STDERR, "ext: git: cannot read the working directory\n");
+            return 1;
+        }
+        r = install_name(root, "git");
+        if (chdir(cwd) < 0) {
+            dprintf(STDERR, "ext: git: cannot restore the working directory\n");
+            return 1;
+        }
+        if (r != 0) return 1;
+        bin = git_program();
+        if (!bin) {
+            dprintf(STDERR, "ext: git: program is not installed\n");
+            return 1;
+        }
+    }
+    return cmd_tool(bin, argc, argv);
+}
+
 static int cmd_rm(int argc, char **argv) {
     int r;
     if (argc != 2) { dprintf(STDERR, "ext: rm needs one path\n"); return 1; }
@@ -882,7 +935,7 @@ static int selftest(void) {
     if (dirstat("/tmp/myos-ext-test/demo/nested", &st) != 0 || st.type != 2) { printf("FAIL nested\n"); fails++; }
     mkdir_p("/tmp/myos-ext-test/instructions/bad");
     f = fopen("/tmp/myos-ext-test/instructions/bad/setup.inst", "w");
-    if (f) { fputs("name bad\ndescr x\ngit clone x\n", f); fclose(f); }
+    if (f) { fputs("name bad\ndescr x\nnope\n", f); fclose(f); }
     if (install_name("/tmp/myos-ext-test/instructions", "bad") == 0) { printf("FAIL unknown accepted\n"); fails++; }
     if (install_name("/tmp/myos-ext-test/instructions", "missing") == 0) { printf("FAIL missing accepted\n"); fails++; }
 
@@ -1055,6 +1108,70 @@ static int selftest(void) {
     if (uninstall_name("/tmp/myos-ext-test/instructions", "noscript") == 0) { printf("FAIL missing uninstall\n"); fails++; }
     if (!stamp_exists("/tmp/myos-ext-test/instructions", "noscript")) { printf("FAIL noscript stamp\n"); fails++; }
     if (dirstat("/tmp/myos-ext-test/noscript/kept", &st) != 0 || st.type != 2) { printf("FAIL kept\n"); fails++; }
+
+    git_hide_system = 1;
+    git_test_bin = "/tmp/myos-ext-test/fake-git";
+    unlink("/tmp/myos-ext-test/fake-git");
+    unlink("/tmp/myos-ext-test/git-dep.log");
+    unlink("/tmp/myos-ext-test/git-args");
+    unlink("/tmp/myos-ext-test/installed/git");
+    unlink("/tmp/myos-ext-test/installed/app");
+    unlink("/tmp/myos-ext-test/installed/app2");
+    unlink("/tmp/myos-ext-test/app-src/git-ran");
+    unlink("/tmp/myos-ext-test/app2-src/git-ran");
+    mkdir_p("/tmp/myos-ext-test/gitpkg");
+    f = fopen("/tmp/myos-ext-test/gitpkg/Makefile", "w");
+    if (!f) { printf("FAIL git makefile\n"); return 1; }
+    fputs("all:\n"
+          "\techo gitdep >> /tmp/myos-ext-test/git-dep.log\n"
+          "\techo '#!/bin/sh' > /tmp/myos-ext-test/fake-git\n"
+          "\techo 'printf \"%s\\n\" \"$$@\" > /tmp/myos-ext-test/git-args' >> /tmp/myos-ext-test/fake-git\n"
+          "\techo ': > git-ran' >> /tmp/myos-ext-test/fake-git\n"
+          "\tchmod 755 /tmp/myos-ext-test/fake-git\n", f);
+    fclose(f);
+    mkdir_p("/tmp/myos-ext-test/instructions/git");
+    f = fopen("/tmp/myos-ext-test/instructions/git/setup.inst", "w");
+    if (!f) { printf("FAIL git inst\n"); return 1; }
+    fputs("name git\ndescr git\nworkdir /tmp/myos-ext-test/gitpkg\nmake\n", f);
+    fclose(f);
+    mkdir_p("/tmp/myos-ext-test/instructions/app");
+    f = fopen("/tmp/myos-ext-test/instructions/app/setup.inst", "w");
+    if (!f) { printf("FAIL app inst\n"); return 1; }
+    fputs("name app\ndescr app\nworkdir /tmp/myos-ext-test/app-src\n"
+          "git clone --depth 1 https://example.com/s.git src\n", f);
+    fclose(f);
+    if (install_name("/tmp/myos-ext-test/instructions", "app") != 0) { printf("FAIL git dep\n"); fails++; }
+    if (!file_is("/tmp/myos-ext-test/git-dep.log", "gitdep\n")) { printf("FAIL git not installed\n"); fails++; }
+    if (dirstat("/tmp/myos-ext-test/app-src/git-ran", &st) != 0 || st.type != 1) { printf("FAIL git cwd\n"); fails++; }
+    if (!file_is("/tmp/myos-ext-test/git-args", "clone\n--depth\n1\nhttps://example.com/s.git\nsrc\n")) {
+        printf("FAIL git args\n"); fails++;
+    }
+    if (install_name("/tmp/myos-ext-test/instructions", "app") != 0) { printf("FAIL git dep again\n"); fails++; }
+    if (!file_is("/tmp/myos-ext-test/git-dep.log", "gitdep\n")) { printf("FAIL git rebuilt\n"); fails++; }
+
+    unlink("/tmp/myos-ext-test/installed/git");
+    unlink("/tmp/myos-ext-test/git-dep.log");
+    mkdir_p("/tmp/myos-ext-test/instructions/app2");
+    f = fopen("/tmp/myos-ext-test/instructions/app2/setup.inst", "w");
+    if (!f) { printf("FAIL app2 inst\n"); return 1; }
+    fputs("name app2\ndescr app2\nworkdir /tmp/myos-ext-test/app2-src\ngit status\n", f);
+    fclose(f);
+    if (install_name("/tmp/myos-ext-test/instructions", "app2") != 0) { printf("FAIL git present\n"); fails++; }
+    if (dirstat("/tmp/myos-ext-test/git-dep.log", &st) == 0) { printf("FAIL git reinstalled\n"); fails++; }
+    if (dirstat("/tmp/myos-ext-test/app2-src/git-ran", &st) != 0 || st.type != 1) { printf("FAIL git present cwd\n"); fails++; }
+    if (!file_is("/tmp/myos-ext-test/git-args", "status\n")) { printf("FAIL git status args\n"); fails++; }
+    if (stamp_exists("/tmp/myos-ext-test/instructions", "git")) { printf("FAIL git stamp without install\n"); fails++; }
+
+    unlink("/tmp/myos-ext-test/fake-git");
+    unlink("/tmp/myos-ext-test/installed/git");
+    f = fopen("/tmp/myos-ext-test/instructions/git/setup.inst", "w");
+    if (!f) { printf("FAIL git cycle inst\n"); return 1; }
+    fputs("name git\ndescr git\ngit status\n", f);
+    fclose(f);
+    if (install_name("/tmp/myos-ext-test/instructions", "git") == 0) { printf("FAIL git cycle accepted\n"); fails++; }
+    if (stamp_exists("/tmp/myos-ext-test/instructions", "git")) { printf("FAIL git cycle stamp\n"); fails++; }
+    git_hide_system = 0;
+    git_test_bin = NULL;
     {
         struct auto_packages selected;
         FILE *af=fopen("/tmp/myos-ext-test/auto.conf","w");

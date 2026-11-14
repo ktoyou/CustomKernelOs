@@ -1,0 +1,14 @@
+# Git 2.47.0. Штатный Makefile, OpenSSL и cURL. Исходники не патчатся.
+name git
+descr Git 2.47.0
+workdir /tmp/ext/git
+fetch https://www.kernel.org/pub/software/scm/git/git-2.47.0.tar.gz git-2.47.0.tar.gz
+tar xzf git-2.47.0.tar.gz
+workdir /tmp/ext/git/git-2.47.0
+copy config.mak config.mak
+# Каждый cc держит заголовки OpenSSL (около 110 МБ). Четыре таких процесса
+# не влезают в 512 МБ, которые QEMU даёт по умолчанию.
+make -j2
+make -j2 install
+# Тот же список корней, что у download: /etc/ssl/cert.pem ставит образ системы.
+copy gitconfig /ext/etc/gitconfig

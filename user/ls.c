@@ -6,7 +6,7 @@
 #include "myos.h"
 #include "sys/stat.h"
 
-static int opt_long, opt_human, opt_all, opt_almost;
+static int opt_long, opt_human, opt_all, opt_almost, opt_one;
 
 static int join_path(char *dst, int cap, const char *dir, const char *name) {
     int nd = (int)strlen(dir), nn = (int)strlen(name), slash;
@@ -56,6 +56,11 @@ static void format_size(char *buf, int cap, unsigned size) {
 }
 
 static void entry(const struct dirent_info *e, const char *shown, const char *path) {
+    /* В конвейере и с -1 — одно имя на строку, как ждёт рецепт шаблонов Git. */
+    if (opt_one && !opt_long) {
+        printf("%s\n", shown);
+        return;
+    }
     if (opt_long) {
         struct stat st;
         char bits[11], sz[16];
@@ -159,7 +164,7 @@ static int take_opt(const char *a) {
         else if (*p == 'h') opt_human = 1;
         else if (*p == 'a') opt_all = 1;
         else if (*p == 'A') opt_almost = 1;
-        else if (*p == '1') ;
+        else if (*p == '1') opt_one = 1;
         else {
             dprintf(STDERR, "ls: unknown option '%c'\n", *p);
             usage();
@@ -178,6 +183,11 @@ int main(int argc, char **argv) {
         if (k < 0) return 1;
         optend = i + 1;
         if (k == 2) break;
+    }
+    if (!opt_long && !opt_one) {
+        struct stat out;
+        /* Каталог на экране остаётся цветным. Труба и файл — голые имена. */
+        if (fstat(STDOUT, &out) != 0 || !S_ISCHR(out.st_mode)) opt_one = 1;
     }
     if (argc <= optend) return list_dir(".", false);
     /* сначала файлы, потом каталоги — как в GNU ls */

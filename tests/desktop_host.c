@@ -79,7 +79,8 @@ int readkey(void) { int k = pending_key; pending_key = 0; return k; }
 static unsigned fake_ticks;
 unsigned ticks(void) { return fake_ticks += 10; }
 void sleep_ms(unsigned ms) { (void)ms; }
-int get_time(struct datetime *t) { t->year = 2026; t->month = 11; t->day = 5; t->hour = 17; t->min = 42; t->sec = 0; return 0; }
+int datetime_get(struct datetime *t) { t->year = 2026; t->month = 11; t->day = 5; t->hour = 17; t->min = 42; t->sec = 0; return 0; }
+int get_time(struct datetime *t) { return datetime_get(t); }
 static int alive_pids[64], nalive;
 int ps(struct proc_info *pi, int max) {
     int n = 0;

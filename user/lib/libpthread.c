@@ -170,10 +170,34 @@ int pthread_once(pthread_once_t *once, void (*fn)(void)) {
     return 0;
 }
 
-int pthread_mutex_init(pthread_mutex_t *m, const void *attr) {
-    (void)attr;
+int pthread_mutexattr_init(pthread_mutexattr_t *attr) {
+    if (!attr) return EINVAL;
+    *attr = PTHREAD_MUTEX_DEFAULT;
+    return 0;
+}
+int pthread_mutexattr_destroy(pthread_mutexattr_t *attr) {
+    if (!attr) return EINVAL;
+    return 0;
+}
+int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
+    if (!attr) return EINVAL;
+    if (type != PTHREAD_MUTEX_NORMAL && type != PTHREAD_MUTEX_RECURSIVE && type != PTHREAD_MUTEX_ERRORCHECK)
+        return EINVAL;
+    *attr = type;
+    return 0;
+}
+int pthread_setcancelstate(int state, int *oldstate) {
+    static int cur = PTHREAD_CANCEL_ENABLE;
+    if (state != PTHREAD_CANCEL_ENABLE && state != PTHREAD_CANCEL_DISABLE) return EINVAL;
+    if (oldstate) *oldstate = cur;
+    cur = state;
+    return 0;
+}
+int pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *attr) {
     if (!m) return EINVAL;
     m->owner = 0;
+    m->depth = 0;
+    m->type = attr ? *attr : PTHREAD_MUTEX_DEFAULT;
     return 0;
 }
 int pthread_mutex_destroy(pthread_mutex_t *m) {
@@ -181,17 +205,33 @@ int pthread_mutex_destroy(pthread_mutex_t *m) {
     if (m->owner) return EBUSY;
     return 0;
 }
+static int mutex_held(pthread_mutex_t *m) {
+    return m->type == PTHREAD_MUTEX_RECURSIVE && m->depth && m->owner == (unsigned)gettid();
+}
 int pthread_mutex_lock(pthread_mutex_t *m) {
+    int r;
     if (!m) return EINVAL;
-    return perr(thread_mutex_lock((thread_mutex_t *)m));
+    if (mutex_held(m)) { m->depth++; return 0; }
+    r = perr(thread_mutex_lock((thread_mutex_t *)m));
+    if (!r) m->depth = 1;
+    return r;
 }
 int pthread_mutex_unlock(pthread_mutex_t *m) {
     if (!m) return EINVAL;
+    if (m->type == PTHREAD_MUTEX_RECURSIVE && m->depth > 1 && m->owner == (unsigned)gettid()) {
+        m->depth--;
+        return 0;
+    }
+    m->depth = 0;
     return perr(thread_mutex_unlock((thread_mutex_t *)m));
 }
 int pthread_mutex_trylock(pthread_mutex_t *m) {
+    int r;
     if (!m) return EINVAL;
-    return perr(thread_mutex_trylock((thread_mutex_t *)m));
+    if (mutex_held(m)) { m->depth++; return 0; }
+    r = perr(thread_mutex_trylock((thread_mutex_t *)m));
+    if (!r) m->depth = 1;
+    return r;
 }
 
 int pthread_cond_init(pthread_cond_t *c, const void *attr) {

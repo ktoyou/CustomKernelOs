@@ -330,6 +330,22 @@ int file_write(struct file *f, const void *buf, u32 len, bool is_stderr) {
     return -EBADF;
 }
 
+int file_pread(struct file *f, void *buf, u32 len, u32 off) {
+    if (!len) return 0;
+    if (f->type != FILE_DISK) return -ESPIPE;
+    if (!(f->mode & FMODE_READ)) return -EBADF;
+    int r = fs_read(f->ino, off, buf, len);
+    return r < 0 ? -EIO : r;
+}
+
+int file_pwrite(struct file *f, const void *buf, u32 len, u32 off) {
+    if (!len) return 0;
+    if (f->type != FILE_DISK) return -ESPIPE;
+    if (!(f->mode & FMODE_WRITE)) return -EBADF;
+    int r = fs_write(f->ino, off, buf, len);
+    return r == FS_ENOSPC ? -ENOSPC : r == FS_EFBIG ? -EFBIG : r < 0 ? -EIO : r;
+}
+
 int file_lseek(struct file *f, int off, int whence) {
     if (f->type != FILE_DISK) return -ESPIPE;
     struct fs_stat st;

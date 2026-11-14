@@ -3,6 +3,9 @@
 #include "block.h"
 #include "string.h"
 #include "task.h"
+#ifndef HOST_TEST
+#include "ipc.h"
+#endif
 #ifdef HOST_TEST
 void *malloc(unsigned long); void free(void *);
 #define bitmap_alloc(n) malloc(n)
@@ -36,8 +39,8 @@ struct superblock {
     u32 bitmap_start, bitmap_blocks;
     u32 inode_start, inode_blocks, inode_count;
     u32 data_start;
-    u32 layout_version, permissions_root; /* version 3; inode/data layout stays v1/v2 */
-    u8  pad[BS - 11 * 4];
+    u32 layout_version, permissions_root, times_root; /* version 3; inode/data layout stays v1/v2 */
+    u8  pad[BS - 12 * 4];
 } __attribute__((packed));
 
 struct inode {
@@ -589,6 +592,7 @@ static int myfs_write_impl(u32 ino, u32 off, const void *buf, u32 n) {
         done += chunk;
     }
     if (off + done > in.size) in.size = off + done;
+    myfs_touch(ino);
     int meta = sync_meta();
     int w = iwrite(ino, &in);
     if (r) return r;
@@ -602,6 +606,7 @@ static int myfs_truncate_impl(u32 ino) {
     if (r) return r;
     if (in.type != FS_TYPE_FILE) return FS_EISDIR;
     free_all_blocks(&in);
+    myfs_touch(ino);
     int w = iwrite(ino, &in);
     int meta = sync_meta();
     if (w) return w;
@@ -617,6 +622,7 @@ static int myfs_stat_impl(u32 ino, struct fs_stat *st) {
     st->links=in.links;
     st->size = in.size;
     r=permissions_load(ino,&in,&st->mode,&st->uid,&st->gid);if(r)return r;
+    st->mtime=st->atime=st->ctime=times_load(ino);
     u32 data = (in.size + BS - 1) / BS;
     u32 nd = n_direct();
     st->blocks = data + (in.indirect ? 1 : 0);
@@ -954,10 +960,23 @@ static int myfs_rename_impl(u32 cwd, const char *src, const char *dst) {
     } else if ((r = resolve_parent(cwd, dst, &dparent, dname))) {
         return r;
     }
-    u32 taken;
-    r = dir_lookup(dparent, dname, &taken, NULL);
+    u32 taken, toff = 0;
+    r = dir_lookup(dparent, dname, &taken, &toff);
     if (r) return r;
-    if (taken) return FS_EEXIST;
+    if (taken) {
+        /* POSIX: rename поверх существующего файла заменяет его. */
+        if (taken == ino) return FS_OK;
+        if (dir_check(taken) == FS_OK) return FS_EEXIST; /* каталог не затираем */
+        struct inode victim;
+        if ((r = iread(taken, &victim))) return r;
+        if ((r = dir_set(dparent, toff, 0, NULL))) return r;
+        victim.links = 0;
+        free_all_blocks(&victim);
+        victim.type = FS_TYPE_FREE;
+        ino_note_free(taken);
+        if ((r = iwrite(taken, &victim))) return r;
+        available_inodes++;
+    }
 
     /* нельзя переместить каталог внутрь самого себя */
     for (u32 p = dparent; ;) {
@@ -1165,6 +1184,18 @@ int myfs_rename(u32 cwd, const char *src, const char *dst) { int r = myfs_rename
 int myfs_read(u32 ino, u32 off, void *buf, u32 n) { int r = myfs_read_impl(ino, off, buf, n); return r; }
 int myfs_write(u32 ino, u32 off, const void *buf, u32 n) { int r = myfs_write_impl(ino, off, buf, n); return r; }
 int myfs_truncate(u32 ino) { int r = myfs_truncate_impl(ino); return r; }
+int myfs_set_size(u32 ino, u32 size) {
+    struct inode in;
+    int r = iread(ino, &in);
+    if (r) return r;
+    if (in.type != FS_TYPE_FILE) return FS_EISDIR;
+    if (size > in.size) return FS_EINVAL;
+    in.size = size;
+    myfs_touch(ino);
+    r = iwrite(ino, &in);
+    if (r) return r;
+    return sync_meta();
+}
 int myfs_stat(u32 ino, struct fs_stat *st) { int r = myfs_stat_impl(ino, st); return r; }
 int myfs_readdir(u32 dir, u32 *pos, struct fs_dirent *out) { int r = myfs_readdir_impl(dir, pos, out); return r; }
 int myfs_getpath(u32 ino, char *buf, u32 len) { int r = myfs_getpath_impl(ino, buf, len); return r; }

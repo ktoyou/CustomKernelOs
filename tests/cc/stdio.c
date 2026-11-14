@@ -31,6 +31,20 @@ int main(void) {
     if (fgetc(f) != '4') fails++;
     if (fclose(f) != 0) fails++;
     unlink(path);
+    {
+        char *mem = NULL;
+        size_t len = 0;
+        FILE *ms = open_memstream(&mem, &len);
+        if (!ms || fprintf(ms, "ab%d", 7) < 0 || fflush(ms) != 0 || len != 3 || strcmp(mem, "ab7") != 0) {
+            printf("memstream early [%s] %u\n", mem ? mem : "", (unsigned)len);
+            fails++;
+        }
+        if (ms && (fputc('!', ms) == EOF || fclose(ms) != 0 || !mem || strcmp(mem, "ab7!") != 0)) {
+            printf("memstream [%s]\n", mem ? mem : "");
+            fails++;
+        }
+        free(mem);
+    }
     if (!fails) printf("stdio: ok\n");
     return fails != 0;
 }

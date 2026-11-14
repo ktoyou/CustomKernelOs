@@ -25,6 +25,7 @@ int  host_write_sector(unsigned lba, const void *buf);
 void host_close_image(void);
 void host_remove_file(const char *path);
 void *host_load_file(const char *path, unsigned *len);
+int  host_save_file(const char *path, const void *data, unsigned len);
 void *host_alloc(unsigned n);
 void host_free(void *p);
 void host_print(const char *s);
@@ -312,6 +313,24 @@ static int cmd_cat(const char *path) {
     return FS_OK;
 }
 
+static int cmd_get(const char *src, const char *dst) {
+    u32 ino;
+    struct fs_stat st;
+    unsigned char *buf;
+    int r = fs_resolve(FS_ROOT, src, &ino);
+    if (r) return r;
+    if ((r = fs_stat(ino, &st))) return r;
+    buf = host_alloc(st.size ? st.size : 1);
+    r = fs_read(ino, 0, buf, st.size);
+    if (r < 0) { host_free(buf); return r; }
+    if ((unsigned)r != st.size) { host_free(buf); return FS_EIO; }
+    if (host_save_file(dst, buf, st.size)) { host_free(buf); return FS_EIO; }
+    host_free(buf);
+    say("  %s -> %s (%u bytes)\n", src, dst, st.size);
+    return FS_OK;
+}
+
+
 static int number(const char *s,u32 base,u32 *out) {
     if(!s || !*s)return FS_EINVAL;u32 n=0;
     for(;*s;s++){u32 v=*s-'0';if(v>=base || n>(0xffffffffu-v)/base)return FS_EINVAL;n=n*base+v;}
@@ -350,6 +369,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd, "mkdir") && argc > 3)   r = mkdir_p(argv[3]);
     else if (!strcmp(cmd, "put") && argc > 4)     r = cmd_put(argv[3], argv[4]);
     else if (!strcmp(cmd, "cat") && argc > 3)     r = cmd_cat(argv[3]);
+    else if (!strcmp(cmd, "get") && argc > 4)     r = cmd_get(argv[3], argv[4]);
     else if (!strcmp(cmd, "rm") && argc > 3)      r = cmd_rm(argv[3]);
     else if(!strcmp(cmd,"stat") || !strcmp(cmd,"chmod") || !strcmp(cmd,"chown"))r=metadata_command(cmd,argc,argv);
     else if (!strcmp(cmd, "grow") && argc > 3)    r = cmd_grow(argv[1], argv[3]);

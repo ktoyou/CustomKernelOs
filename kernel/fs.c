@@ -496,6 +496,13 @@ int fs_rename(u32 cwd,const char *src,const char *dst) {
     }
     lookup_cache_clear(); mutex_unlock(&lock); return r;
 }
+int fs_set_size(u32 ino, u32 size) {
+    mutex_lock(&lock);
+    int r = select_inode(ino);
+    if (!r) r = myfs_set_size(LOCAL(ino), size);
+    mutex_unlock(&lock);
+    return r;
+}
 int fs_truncate(u32 ino) {
     mutex_lock(&lock); int r;
     if(devchr(ino)) r=0; else if(isdev(ino)) r=FS_EROFS;

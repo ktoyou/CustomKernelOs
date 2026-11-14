@@ -59,6 +59,14 @@ int fs_chmod(u32 ino,u32 mode) {
     if(!ret){ret=select_inode(ino);if(!ret)ret=myfs_setattr(LOCAL(ino),mode,st.uid,st.gid);}
     mutex_unlock(&lock);return ret;
 }
+int fs_utime(u32 ino,u32 when) {
+    mutex_lock(&lock);struct fs_stat st;int ret=stat_impl(ino,&st);
+    u32 uid,gid,mask;credentials(&uid,&gid,&mask,false);
+    if(!ret && uid && uid!=st.uid)ret=access_impl(ino,2,false);
+    if(!ret && isdev(ino))ret=FS_EROFS;
+    if(!ret){ret=select_inode(ino);if(!ret)ret=myfs_set_time(LOCAL(ino),when);}
+    mutex_unlock(&lock);return ret;
+}
 int fs_chown(u32 ino,u32 owner,u32 group) {
     mutex_lock(&lock);struct fs_stat st;int ret=stat_impl(ino,&st);
     u32 uid,gid,mask;credentials(&uid,&gid,&mask,false);

@@ -6,6 +6,11 @@
 #include <time.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <glob.h>
+#include <spawn.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 
 static int fails;
 
@@ -68,6 +73,38 @@ int main(void) {
     if (fd >= 0) close(fd);
     unlink("build/posix-notty.txt");
     CHECK(isatty(-1) == 0);
+
+    CHECK(strtof("1.5", &end) == 1.5f && end && *end == 0);
+    CHECK(strtold("2.5", &end) == 2.5L && end && *end == 0);
+    {
+        char stamp[32];
+        now = 1700000000;
+        CHECK(ctime_r(&now, stamp) == stamp && stamp[24] == '\n');
+    }
+    {
+        struct rusage ru;
+        CHECK(getrusage(RUSAGE_SELF, &ru) == 0);
+    }
+    errno = 0;
+    CHECK(mkfifo("/tmp/myos-ext-mkfifo", 0600) == -1 && errno == ENOSYS);
+    {
+        glob_t g;
+        memset(&g, 0, sizeof g);
+        CHECK(glob("tests/cc/posix.c", 0, NULL, &g) == 0 && g.gl_pathc == 1);
+        globfree(&g);
+        CHECK(glob("tests/cc/no-such-posix", 0, NULL, &g) == GLOB_NOMATCH && g.gl_pathc == 0);
+        CHECK(glob("tests/cc/posix.*", 0, NULL, &g) == 0 && g.gl_pathc >= 1);
+        globfree(&g);
+    }
+#ifdef __LINUX_TEST__
+    {
+        pid_t pid;
+        int st = 1;
+        char *av[] = { "true", NULL };
+        CHECK(posix_spawnp(&pid, "true", NULL, NULL, av, environ) == 0);
+        CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+#endif
 
     return fails != 0;
 }

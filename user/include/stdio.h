@@ -1,6 +1,7 @@
 #ifndef STDIO_H
 #define STDIO_H
 #include "stdarg.h"
+#include "sys/types.h"
 
 #define EOF (-1)
 #define BUFSIZ 512
@@ -14,8 +15,10 @@
 typedef struct FILE {
     int fd;
     int flags;
-    char *mem;          /* буфер fmemopen, иначе NULL */
-    int mem_pos, mem_len;
+    char *mem;          /* буфер fmemopen или open_memstream, иначе NULL */
+    int mem_pos, mem_len, mem_cap;
+    char **ms_buf;      /* open_memstream: куда отдать буфер */
+    size_t *ms_size;    /* длина без завершающего нуля */
 } FILE;
 
 extern FILE *stdin, *stdout, *stderr;
@@ -26,6 +29,7 @@ FILE *tmpfile(void);
 char *tmpnam(char *s);
 FILE *fdopen(int fd, const char *mode);
 FILE *fmemopen(void *buf, size_t size, const char *mode);
+FILE *open_memstream(char **ptr, size_t *sizeloc);
 int fclose(FILE *f);
 int fflush(FILE *f);
 int fileno(FILE *f);
@@ -35,6 +39,8 @@ void clearerr(FILE *f);
 void perror(const char *s);
 int fseek(FILE *f, long off, int whence);
 long ftell(FILE *f);
+int fseeko(FILE *f, off_t off, int whence);
+off_t ftello(FILE *f);
 void rewind(FILE *f);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f);
@@ -48,6 +54,8 @@ int fprintf(FILE *f, const char *fmt, ...);
 int vprintf(const char *fmt, va_list ap);
 int sprintf(char *buf, const char *fmt, ...);
 int sscanf(const char *s, const char *fmt, ...);
+int fscanf(FILE *f, const char *fmt, ...);
+int scanf(const char *fmt, ...);
 int vsprintf(char *buf, const char *fmt, va_list ap);
 ssize_t getline(char **line, size_t *n, FILE *stream);
 int setvbuf(FILE *f, char *buf, int mode, size_t size);

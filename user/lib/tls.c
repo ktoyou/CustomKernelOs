@@ -26,7 +26,7 @@ static unsigned get_seed_extra(void) { return (unsigned)time(NULL) ^ (unsigned)g
 #include "myos.h"
 static unsigned get_seed_extra(void) {
     struct datetime d;
-    get_time(&d);
+    datetime_get(&d);
     return ((d.year * 13 + d.month) * 32 + d.day) * 86400 + d.hour * 3600 + d.min * 60 + d.sec + getpid() * 7919;
 }
 #endif

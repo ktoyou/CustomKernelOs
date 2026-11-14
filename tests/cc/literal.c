@@ -1,5 +1,9 @@
 #include <stdio.h>
 
+struct LitPair { int a; int b; };
+static struct LitPair *lit_pair = &(struct LitPair){ .b = 9, .a = 7 };
+static int *lit_eleven = &(int){11};
+
 static unsigned fbits(float f) {
     union { float f; unsigned i; } u;
     u.f = f;
@@ -16,6 +20,8 @@ int main(void) {
     if (pi < 3.141592653589792 || pi > 3.141592653589794) return 3;
     if (fbits(1.0f) != 0x3f800000u) return 4;
     if (s.a != 2 || s.b != 3) return 5;
+    if (!lit_pair || lit_pair->a != 7 || lit_pair->b != 9) return 9;
+    if (!lit_eleven || *lit_eleven != 11) return 10;
     if (0x1p10 != 1024) return 6;
     if (0x1p-10 != 1.0 / 1024) return 7;
     if (0x0.8p1 != 1) return 8;

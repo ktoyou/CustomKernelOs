@@ -79,7 +79,8 @@ int browser_host_fetch(const char *url, char *location, int loc_max, bool *is_ht
 unsigned ticks(void) { long ts[2]; clock_gettime(1, ts); return ts[0] * 1000 + ts[1] / 1000000; }
 void sleep_ms(unsigned ms) { usleep(ms * 1000); }
 void yield(void) { usleep(0); }
-int get_time(struct datetime *t) { memset(t, 0, sizeof(*t)); t->year = 2026; t->month = 11; t->day = 6; t->hour = 12; return 0; }
+int datetime_get(struct datetime *t) { memset(t, 0, sizeof(*t)); t->year = 2026; t->month = 11; t->day = 6; t->hour = 12; return 0; }
+int get_time(struct datetime *t) { return datetime_get(t); }
 int __syscall(int n, int a, int b, int c) { (void)n; (void)a; (void)b; (void)c; return -1; }
 int getpid(void) { return 7; }
 int ttymode(int m) { return m; }

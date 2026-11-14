@@ -403,7 +403,7 @@ static void undo_to(int *at, Undo *u, int *nmk, int target) {
 
 /* Итеративный поиск: стек развилок на куче, чтобы длинная .* не росла стеком Си.
  * Повтор SPLIT в той же позиции — пустой цикл, берём другую ветку. */
-static int run(Re *re, const char *s, int n, int pos, int *slots, int eflags) {
+static int run(Re *re, const char *s, int n, int pos, int *slots, int eflags, int bol) {
     int ns = (re->nsub + 1) * 2;
     int pc = 0, steps = 0, nmk = 0, mcap = 0, nch = 0, ccap = 0;
     int *at = malloc(sizeof(int) * (size_t)re->ncode);
@@ -430,7 +430,7 @@ static int run(Re *re, const char *s, int n, int pos, int *slots, int eflags) {
             if (pos >= n || !class_has(re, re->code[pc + 1], (unsigned char)s[pos])) goto fail;
             pos++; pc += 2;
         } else if (op == OP_BOL) {
-            if (pos == 0) { if (eflags & REG_NOTBOL) goto fail; }
+            if (pos == bol) { if (eflags & REG_NOTBOL) goto fail; }
             else if (!((re->flags & REG_NEWLINE) && s[pos - 1] == '\n')) goto fail;
             pc++;
         } else if (op == OP_EOL) {
@@ -553,13 +553,21 @@ int regexec(const regex_t *preg, const char *string, size_t nmatch, regmatch_t *
     int slots[64];
     if (!preg || !preg->re_p || !string) return REG_BADPAT;
     re = preg->re_p;
-    n = (int)strlen(string);
+    if (eflags & REG_STARTEND) {
+        if (!pmatch || pmatch[0].rm_so < 0 || pmatch[0].rm_eo < pmatch[0].rm_so) return REG_BADPAT;
+        start = (int)pmatch[0].rm_so;
+        n = (int)pmatch[0].rm_eo;
+    } else {
+        start = 0;
+        n = (int)strlen(string);
+    }
     ns = (re->nsub + 1) * 2;
     if (ns > 64) return REG_ESPACE;
-    for (start = 0; start <= n; start++) {
+    for (; start <= n; start++) {
         int r;
+        int bol = (eflags & REG_STARTEND) ? (int)pmatch[0].rm_so : 0;
         for (i = 0; i < ns; i++) slots[i] = -1;
-        r = run(re, string, n, start, slots, eflags);
+        r = run(re, string, n, start, slots, eflags, bol);
         if (r < 0) return REG_ESPACE;
         if (r == 1) {
             if (pmatch && !(re->flags & REG_NOSUB)) {

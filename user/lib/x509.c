@@ -869,7 +869,7 @@ static void now_str(char *out) {
     snprintf(out, 16, "%04d%02d%02d%02d%02d%02d", g->tm_year + 1900, g->tm_mon + 1, g->tm_mday, g->tm_hour, g->tm_min, g->tm_sec);
 #else
     struct datetime d;
-    get_time(&d);
+    datetime_get(&d);
     snprintf(out, 16, "%04d%02d%02d%02d%02d%02d", d.year, d.month, d.day, d.hour, d.min, d.sec);
 #endif
 }

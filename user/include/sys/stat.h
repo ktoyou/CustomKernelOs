@@ -1,6 +1,7 @@
 #ifndef SYS_STAT_H
 #define SYS_STAT_H
 #include "sys/types.h"
+#include "time.h"
 
 struct stat {
     unsigned st_mode;
@@ -15,6 +16,9 @@ struct stat {
     unsigned st_blocks;
     unsigned st_nlink;
     unsigned st_rdev;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
 };
 
 #define S_IFMT   0170000
@@ -55,4 +59,5 @@ int fchmod(int fd, mode_t mode);
 int fstat(int fd, struct stat *st);
 int stat(const char *path, struct stat *st);
 int lstat(const char *path, struct stat *st);
+int mkfifo(const char *path, mode_t mode);
 #endif

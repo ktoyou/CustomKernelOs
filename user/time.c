@@ -1,5 +1,6 @@
 /* time команда [аргументы] — запустить программу и сказать, сколько она работала */
 #include "myos.h"
+#include "sys/wait.h"
 
 int main(int argc, char **argv) {
     if (argc < 2) { dprintf(STDERR, "usage: time command [args...]\n"); return 2; }
@@ -27,5 +28,5 @@ int main(int argc, char **argv) {
     waitpid(pid, &status, 0);
     unsigned ms = ticks() - start;
     dprintf(STDERR, "real %u.%03u s\n", ms / 1000, ms % 1000);
-    return status;
+    return WIFSIGNALED(status) ? 128 + WTERMSIG(status) : WEXITSTATUS(status);
 }

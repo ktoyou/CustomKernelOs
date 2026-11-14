@@ -1576,7 +1576,7 @@ static void update_clock(void) {
     static const char *mon[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     static const char *wd[7] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
     struct datetime t;
-    if (get_time(&t) < 0) return;
+    if (datetime_get(&t) < 0) return;
     /* день недели (Сакамото) */
     static const int k[12] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
     int y = t.year - (t.month < 3);
